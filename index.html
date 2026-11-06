@@ -81,6 +81,8 @@ const SUPABASE_KEY = 'sb_publishable_D5ln2629-5sxQUzek6-feg_ArmyMz1M';
     ubahStatusAkun:['krt_ubah_status_akun',['p_token','p_username','p_aktif']],
     resetPasswordAkun:['krt_reset_password_akun',['p_token','p_username']],
     buatAkunWarga:['krt_buat_akun_warga',['p_token']],
+    daftarToken:['krt_daftar_token',['p_token','p_fcm']],
+    hapusToken:['krt_hapus_token',['p_token','p_fcm']],
     gantiPassword:['krt_ganti_password',['p_token','p_lama','p_baru']]
   };
   function call(def,args){
@@ -105,6 +107,7 @@ const SUPABASE_KEY = 'sb_publishable_D5ln2629-5sxQUzek6-feg_ArmyMz1M';
 })();
 </script>
 <script>
+let pushDaftar=false;
 const IDENTITAS={rt:'RT 003',rw:'RW 001',desa:'JATIREJO',kecamatan:'GUNUNGPATI',kota:'KOTA SEMARANG'}; // dikunci, tidak bisa diubah dari aplikasi
 function kunciIdentitas(){if(!db.settings||typeof db.settings!=='object')db.settings={};Object.assign(db.settings,IDENTITAS)}
 const defaults={settings:{rt:'RT 001',rw:'RW 001',desa:'Isi nama desa/kelurahan',kecamatan:'Isi nama kecamatan',kota:'Isi nama kabupaten/kota',tahun:2026,saldo:0,bendahara:''},warga:[],transaksi:[]};
@@ -183,6 +186,7 @@ function refreshCloud(silent=false){
           render();
         }else if(roleChanged)render();
         cloudReady=true;
+        if(!pushDaftar){pushDaftar=true;daftarPush(0)}
         setSyncStatus('Terhubung · sinkron '+new Date().toLocaleTimeString('id-ID'));
       }else if(!silent){setSyncStatus('Gagal membaca database',false);alert('Tidak dapat membaca database.');}
     })
@@ -203,7 +207,7 @@ function initCloud(){
 }
 function renderLogin(){loginShown=true;document.getElementById('app').innerHTML=`<div class="card"><h2>Masuk</h2>${loginMsg?`<p class="note" style="color:var(--red)">${esc(loginMsg)}</p>`:''}<p class="note">Warga masuk dengan nomor HP yang terdaftar dan password dari pengurus.${setupDone?'':' <b>Akun admin belum disiapkan:</b> jalankan <code>select krt.setup_initial_admin();</code> di SQL Editor Supabase.'}</p><form onsubmit="doLogin(event)"><label>Nama pengguna / No. HP</label><input id="lgUser" autocomplete="username" autocapitalize="none" required><label>Password</label><input id="lgPass" type="password" autocomplete="current-password" required><div class="actions"><button class="btn" type="submit">Masuk</button></div></form></div>`}
 function doLogin(e){e.preventDefault();let b=e.target.querySelector('button');b.disabled=true;google.script.run.withSuccessHandler(r=>{b.disabled=false;if(r&&r.ok){loginMsg='';loginShown=false;setAuth(r.token,r.user,r.role,r.temp);document.getElementById('app').innerHTML='<div class="card"><h2>Memuat data…</h2></div>';cloudReady=false;cloudRefreshing=false;refreshCloud(false);if(r.temp)setTimeout(()=>openGantiPw(true),700)}else alert((r&&r.message)||'Gagal masuk.')}).withFailureHandler(err=>{b.disabled=false;alert((err&&err.message)||'Gagal terhubung ke server.')}).login(lgUser.value,lgPass.value)}
-function doLogout(local){if(local!==true&&auth.token)google.script.run.logout(auth.token);closeModal();setAuth();db=structuredClone(defaults);cloudReady=false;cloudPending=false;loginMsg='';loginShown=false;document.getElementById('headTitle').textContent='Keuangan RT';document.getElementById('headSub').textContent='Catat kas, iuran, dan laporan warga';render()}
+function doLogout(local){let tk=auth.token,pt=pushToken();if(local!==true&&tk){if(pt){let lanjut=()=>google.script.run.logout(tk);google.script.run.withSuccessHandler(lanjut).withFailureHandler(lanjut).hapusToken(tk,pt)}else google.script.run.logout(tk)}pushDaftar=false;closeModal();setAuth();db=structuredClone(defaults);cloudReady=false;cloudPending=false;loginMsg='';loginShown=false;document.getElementById('headTitle').textContent='Keuangan RT';document.getElementById('headSub').textContent='Catat kas, iuran, dan laporan warga';render()}
 function openGantiPw(temp){if(auth.role==='viewer'&&auth.temp!==true){alert('Viewer hanya dapat mengganti password satu kali. Jika lupa, hubungi admin untuk reset password.');return;}showModal(`<h2>${temp===true?'Ganti password sementara':'Ganti password saya'}</h2>${temp===true?'<p class="note">Anda masuk dengan password sementara. Buat password pribadi sekarang.</p>':''}<form onsubmit="doGantiPw(event)"><label>Password lama</label><input id="pwLama" type="password" autocomplete="current-password" required><label>Password baru (minimal ${auth.role==='warga'?8:10} karakter)</label><input id="pwBaru" type="password" autocomplete="new-password" minlength="${auth.role==='warga'?8:10}" required><div class="actions"><button class="btn">Simpan password</button><button class="btn secondary" type="button" onclick="closeModal()">Nanti</button></div></form>`)}
 function doGantiPw(e){e.preventDefault();srv('gantiPassword',[auth.token,pwLama.value,pwBaru.value],()=>{alert('Password berhasil diganti. Silakan masuk kembali dengan password baru.');doLogout(true)})}
 function passwordCard(){const bolehGanti=auth.role!=='viewer'||auth.temp===true;return `<details class="card"><summary><h3>Akun saya</h3><span class="chev">▾</span></summary><p class="note">Masuk sebagai <b>${esc(auth.user)}</b> (${ROLE_LABEL[auth.role]||auth.role}).${canEdit()?'':auth.role==='warga'?' Akun warga hanya dapat melihat data.':' Akun Viewer hanya dapat melihat data.'}${auth.role==='viewer'&&!bolehGanti?' Password sudah diganti. Hubungi admin jika lupa password.':''}</p><div class="actions">${bolehGanti?'<button class="btn secondary" onclick="openGantiPw()">Ganti password saya</button>':''}<button class="btn danger" onclick="doLogout()">Keluar</button></div></details>`}
@@ -454,6 +458,21 @@ function render(){try{
   console.error(err);
   document.getElementById('app').innerHTML=`<div class="card"><h2>Terjadi kesalahan tampilan</h2><p class="note">${esc(err&&err.message?err.message:String(err))}</p><div class="actions"><button class="btn" onclick="doLogout(true)">Masuk ulang</button></div></div>`;
 }}
+function pushToken(){try{return (window.AndroidBridge&&AndroidBridge.getPushToken&&AndroidBridge.getPushToken())||''}catch(e){return ''}}
+function daftarPush(n){
+  if(!auth.token)return;
+  let t=pushToken();
+  if(!t){if(window.AndroidBridge&&(n||0)<5)setTimeout(()=>daftarPush((n||0)+1),4000);return}
+  google.script.run.withSuccessHandler(()=>{}).withFailureHandler(()=>{}).daftarToken(auth.token,t);
+}
+function kirimPush(isi){
+  let h={'Content-Type':'application/json',apikey:SUPABASE_KEY};
+  if(SUPABASE_KEY.startsWith('eyJ'))h.Authorization='Bearer '+SUPABASE_KEY;
+  fetch(SUPABASE_URL+'/functions/v1/smart-handler',{method:'POST',headers:h,body:JSON.stringify({token:auth.token,judul:'Pengumuman '+(db.settings.rt||'RT'),isi:isi})})
+    .then(r=>r.json().catch(()=>({})))
+    .then(j=>alert(j&&j.ok?(j.terkirim>0?'Pengumuman tersimpan. Notifikasi terkirim ke '+j.terkirim+' perangkat.':'Pengumuman tersimpan. Belum ada HP warga yang terdaftar untuk menerima notifikasi.'):'Pengumuman tersimpan, tetapi notifikasi gagal dikirim: '+((j&&j.message)||'tidak diketahui')))
+    .catch(()=>alert('Pengumuman tersimpan, tetapi notifikasi gagal dikirim. Periksa koneksi internet.'));
+}
 function pengumumanCard(){
   let p=(db.settings&&db.settings.pengumuman)||null,ada=!!(p&&String(p.teks||'').trim());
   if(!ada&&!canEdit())return '';
@@ -462,14 +481,16 @@ function pengumumanCard(){
 function openPengumuman(){
   if(!need('operator'))return;
   let p=db.settings.pengumuman||{};
-  showModal(`<div class="itemtop"><h2 style="margin:0">Pengumuman</h2><button class="btn secondary small" onclick="closeModal()">Tutup</button></div><label>Isi pengumuman (terlihat oleh semua yang login)</label><textarea id="pgTeks" rows="6" maxlength="1000">${esc(p.teks||'')}</textarea><div class="actions"><button class="btn" onclick="simpanPengumuman()">Simpan</button>${p.teks?`<button class="btn danger" onclick="hapusPengumuman()">Hapus</button>`:''}</div>`);
+  showModal(`<div class="itemtop"><h2 style="margin:0">Pengumuman</h2><button class="btn secondary small" onclick="closeModal()">Tutup</button></div><label>Isi pengumuman (terlihat oleh semua yang login)</label><textarea id="pgTeks" rows="6" maxlength="1000">${esc(p.teks||'')}</textarea><label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input id="pgPush" type="checkbox" checked style="width:auto;min-height:0"> Kirim juga sebagai notifikasi ke HP warga</label><div class="actions"><button class="btn" onclick="simpanPengumuman()">Simpan</button>${p.teks?`<button class="btn danger" onclick="hapusPengumuman()">Hapus</button>`:''}</div>`);
 }
 function simpanPengumuman(){
   if(!need('operator'))return;
   let t=document.getElementById('pgTeks').value.trim();
   if(!t){hapusPengumuman();return}
+  let kirim=!!(document.getElementById('pgPush')&&document.getElementById('pgPush').checked);
   db.settings.pengumuman={teks:t.slice(0,1000),tanggal:dateNow(),oleh:auth.user};
   save();closeModal();render();
+  if(kirim)kirimPush(t.slice(0,300));
 }
 function hapusPengumuman(){
   if(!need('operator'))return;
