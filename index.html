@@ -107,6 +107,8 @@ const SUPABASE_KEY = 'sb_publishable_D5ln2629-5sxQUzek6-feg_ArmyMz1M';
     daftarToken:['krt_daftar_token',['p_token','p_fcm']],
     hapusToken:['krt_hapus_token',['p_token','p_fcm']],
     gantiPassword:['krt_ganti_password',['p_token','p_lama','p_baru']],
+    gantiUsername:['krt_ganti_username',['p_token','p_password','p_baru']],
+    hapusAkun:['krt_hapus_akun',['p_token','p_username','p_alasan']],
     bacaAudit:['krt_baca_audit',['p_token','p_batas','p_sebelum']],
     verifikasiAudit:['krt_verifikasi_audit',['p_token']]
   };
@@ -135,7 +137,7 @@ const SUPABASE_KEY = 'sb_publishable_D5ln2629-5sxQUzek6-feg_ArmyMz1M';
 <script>
 let pushDaftar=false;
 const IDENTITAS={rt:'RT 003',rw:'RW 001',desa:'JATIREJO',kecamatan:'GUNUNGPATI',kota:'KOTA SEMARANG'}; // dikunci, tidak bisa diubah dari aplikasi
-function kunciIdentitas(){if(!db.settings||typeof db.settings!=='object')db.settings={};for(const k of Object.keys(IDENTITAS)){if(db.settings[k]==null||db.settings[k]==='')db.settings[k]=IDENTITAS[k]}}
+function kunciIdentitas(){if(!db.settings||typeof db.settings!=='object')db.settings={};for(const k of Object.keys(IDENTITAS)){db.settings[k]=IDENTITAS[k]}}
 const defaults={settings:{rt:'RT 001',rw:'RW 001',desa:'Isi nama desa/kelurahan',kecamatan:'Isi nama kecamatan',kota:'Isi nama kabupaten/kota',tahun:2026,saldo:0,bendahara:''},warga:[],transaksi:[]};
 let db=structuredClone(defaults),tab='home',editId=null;
 let auth={token:'',user:'',role:'',temp:false},accounts=[],loginMsg='',loginShown=false,setupDone=true;
@@ -348,12 +350,31 @@ function doLogin(e){e.preventDefault();let b=e.target.querySelector('button');b.
 function doLogout(local){if(local!==true&&offlineDirty){if(!confirm('Ada '+Math.max(1,diffCount(baseDb,db))+' perubahan yang belum terkirim ke server. Jika keluar sekarang, perubahan itu akan hilang.\n\nTetap keluar?'))return;selesaiAntrean();cloudPending=false}offlineDirty=false;updateOfflineBar();let tk=auth.token,pt=pushToken();if(local!==true&&tk){if(pt){let lanjut=()=>google.script.run.logout(tk);google.script.run.withSuccessHandler(lanjut).withFailureHandler(lanjut).hapusToken(tk,pt)}else google.script.run.logout(tk)}pushDaftar=false;closeModal();setAuth();db=structuredClone(defaults);cloudReady=false;cloudPending=false;auditCache={items:[],total:0,loading:false,loaded:false,filter:'Hapus'};loginMsg='';loginShown=false;document.getElementById('headTitle').textContent='Keuangan RT';document.getElementById('headSub').textContent='Catat kas, iuran, dan laporan warga';render()}
 function openGantiPw(temp){if(auth.role==='viewer'&&auth.temp!==true){alert('Viewer hanya dapat mengganti password satu kali. Jika lupa, hubungi admin untuk reset password.');return;}showModal(`<h2>${temp===true?'Ganti password sementara':'Ganti password saya'}</h2>${temp===true?'<p class="note">Anda masuk dengan password sementara. Buat password pribadi sekarang.</p>':''}<form onsubmit="doGantiPw(event)"><label>Password lama</label><input id="pwLama" type="password" autocomplete="current-password" required><label>Password baru (minimal ${auth.role==='warga'?8:10} karakter)</label><input id="pwBaru" type="password" autocomplete="new-password" minlength="${auth.role==='warga'?8:10}" required><div class="actions"><button class="btn">Simpan password</button><button class="btn secondary" type="button" onclick="closeModal()">Nanti</button></div></form>`)}
 function doGantiPw(e){e.preventDefault();srv('gantiPassword',[auth.token,pwLama.value,pwBaru.value],()=>{alert('Password berhasil diganti. Silakan masuk kembali dengan password baru.');doLogout(true)})}
-function passwordCard(){const bolehGanti=auth.role!=='viewer'||auth.temp===true;return `<details class="card"><summary><h3>Akun saya</h3><span class="chev">▾</span></summary><p class="note">Masuk sebagai <b>${esc(auth.user)}</b> (${ROLE_LABEL[auth.role]||auth.role}).${canEdit()?'':auth.role==='warga'?' Akun warga hanya dapat melihat data.':' Akun Viewer hanya dapat melihat data.'}${auth.role==='viewer'&&!bolehGanti?' Password sudah diganti. Hubungi admin jika lupa password.':''}</p><div class="actions">${bolehGanti?'<button class="btn secondary" onclick="openGantiPw()">Ganti password saya</button>':''}<button class="btn danger" onclick="doLogout()">Keluar</button></div></details>`}
+function openGantiUsername(){
+  if(!isAdmin())return;
+  if(offlineDirty||cloudPending){alert('Masih ada perubahan yang belum terkirim ke server. Tunggu hingga tersinkron (atau sambungkan internet), lalu coba lagi.');return}
+  showModal(`<h2>Ganti nama pengguna</h2><p class="note">Nama saat ini: <b>${esc(auth.user)}</b>. Setelah diganti, Anda harus masuk kembali dengan nama baru dan password yang sama. Catatan lama di jejak audit tetap memakai nama lama.</p><form onsubmit="doGantiUsername(event)"><label>Nama pengguna baru (3-20 karakter: huruf kecil, angka, titik, _ atau -)</label><input id="unBaru" autocapitalize="none" autocomplete="off" pattern="[a-z0-9._\\-]{3,20}" minlength="3" maxlength="20" required><label>Password saat ini</label><input id="unPw" type="password" autocomplete="current-password" required><div class="actions"><button class="btn">Simpan nama pengguna</button><button class="btn secondary" type="button" onclick="closeModal()">Batal</button></div></form>`)
+}
+function doGantiUsername(e){
+  e.preventDefault();
+  let baru=(unBaru.value||'').trim().toLowerCase();
+  if(!/^[a-z0-9._-]{3,20}$/.test(baru)){alert('Nama pengguna 3-20 karakter: huruf kecil, angka, titik, garis bawah, atau strip.');return}
+  if(/^\+?[0-9][0-9 ().-]*$/.test(baru)){alert('Nama pengguna tidak boleh berupa angka atau nomor telepon.');return}
+  srv('gantiUsername',[auth.token,unPw.value,baru],r=>{alert('Nama pengguna diganti menjadi "'+((r&&r.username)||baru)+'". Silakan masuk kembali dengan nama baru.');doLogout(true)})
+}
+function passwordCard(){const bolehGanti=auth.role!=='viewer'||auth.temp===true;return `<details class="card"><summary><h3>Akun saya</h3><span class="chev">▾</span></summary><p class="note">Masuk sebagai <b>${esc(auth.user)}</b> (${ROLE_LABEL[auth.role]||auth.role}).${canEdit()?'':auth.role==='warga'?' Akun warga hanya dapat melihat data.':' Akun Viewer hanya dapat melihat data.'}${auth.role==='viewer'&&!bolehGanti?' Password sudah diganti. Hubungi admin jika lupa password.':''}</p><div class="actions">${bolehGanti?'<button class="btn secondary" onclick="openGantiPw()">Ganti password saya</button>':''}${auth.role==='admin'?'<button class="btn secondary" onclick="openGantiUsername()">Ganti nama pengguna</button>':''}<button class="btn danger" onclick="doLogout()">Keluar</button></div></details>`}
 let auditCache={items:[],total:0,loading:false,loaded:false,filter:'Hapus'};
 function formatAuditWaktu(w){
   try{return new Date(w).toLocaleString('id-ID',{timeZone:'Asia/Jakarta',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})+' WIB'}catch(x){return String(w||'')}
 }
 function auditIsiRingkas(e){
+  if(e.objek==='Akun'&&e.aksi==='Hapus'){
+    let b=e.sebelum||{};
+    return `Akun dihapus: <b>${esc(b.username||e.ref_id||'-')}</b>${b.role?' · '+esc(ROLE_LABEL[b.role]||b.role):''}`;
+  }
+  if(e.objek==='Akun'){
+    return `Nama pengguna: <b>${esc((e.sebelum&&e.sebelum.username)||'-')}</b> → <b>${esc((e.sesudah&&e.sesudah.username)||'-')}</b>`;
+  }
   if(e.objek==='Warga'){
     let n=(e.sesudah&&e.sesudah.nama)||(e.sebelum&&e.sebelum.nama)||'-';
     let al=(e.sesudah&&e.sesudah.alamat)||(e.sebelum&&e.sebelum.alamat)||'';
@@ -387,7 +408,11 @@ function auditItem(e){
   if(e.objek==='Transaksi'&&e.sebelum&&pencatatLabel(e.sebelum))
     asal=`<div class="muted">Awalnya dicatat oleh: ${esc(pencatatLabel(e.sebelum))}</div>`;
   let alasan=e.alasan?`<div class="muted">Alasan: ${esc(e.alasan)}</div>`:'';
-  return `<div class="item" style="border-left:5px solid ${warna}"><div class="itemtop"><b style="color:${warna}">${esc(label)}: ${esc(e.objek||'Data')}</b><span class="muted">${esc(formatAuditWaktu(e.waktu))}</span></div><div>${auditIsiRingkas(e)}</div><div class="muted">Oleh: <b>${oleh}</b>${e.peran?' ('+esc(ROLE_LABEL[e.peran]||e.peran)+')':''}</div>${asal}${alasan}</div>`;
+  // Bingkai transaksi mengikuti jenisnya: Pemasukan = hijau, Pengeluaran = merah
+  let jenisTx=e.objek==='Transaksi'?String((e.sesudah||e.sebelum||{}).jenis||''):'';
+  let kelas=jenisTx==='Pemasukan'?' income':(jenisTx==='Pengeluaran'?' expense':'');
+  let gaya=kelas?'':` style="border-left:5px solid ${warna}"`;
+  return `<div class="item${kelas}"${gaya}><div class="itemtop"><b style="color:${warna}">${esc(label)}: ${esc(e.objek||'Data')}</b><span class="muted">${esc(formatAuditWaktu(e.waktu))}</span></div><div>${auditIsiRingkas(e)}</div><div class="muted">Oleh: <b>${oleh}</b>${e.peran?' ('+esc(ROLE_LABEL[e.peran]||e.peran)+')':''}</div>${asal}${alasan}</div>`;
 }
 function muatAudit(reset){
   if(!isAdmin()||auditCache.loading)return;
@@ -432,7 +457,7 @@ ${more?`<div class="actions"><button class="btn secondary" onclick="muatAudit(fa
 </details>`;
 }
 function userCard(){if(!isAdmin())return '';return `<details class="card"><summary><h3>Pengguna aplikasi</h3><span class="chev">▾</span></summary><p class="note">Operator dapat melihat dan mengubah data. Viewer hanya dapat melihat data. Warga hanya melihat pengumuman, ringkasan kas, dan iuran miliknya sendiri. Akun baru mendapat password sementara yang hanya ditampilkan sekali.</p><div class="actions"><button class="btn" onclick="buatAkunWargaMasal()">Buat akun semua warga (login pakai No. HP)</button></div><p class="note">Nama pengguna warga = nomor HP di data Warga. Warga yang sudah punya akun, tanpa No. HP, atau berstatus Nonaktif dilewati. Bisa ditekan lagi nanti untuk warga baru.</p><div id="accList"><p class="note">Memuat…</p></div><form onsubmit="doBuatAkun(event)"><label>Nama pengguna baru</label><input id="acUser" required pattern="[a-zA-Z0-9._\\-]{3,20}" autocapitalize="none"><label>Peran</label><select id="acRole"><option value="operator">Operator</option><option value="viewer">Viewer</option></select><div class="actions"><button class="btn">Buat akun</button></div></form></details>`}
-function accHtml(){return accounts.map(a=>`<div class="item"><div class="itemtop"><span><b>${esc(a.username)}</b> · ${ROLE_LABEL[a.role]||a.role}${a.warga_id&&namaWarga(a.warga_id)?' · '+esc(namaWarga(a.warga_id)):''}</span><span class="pill ${a.aktif?'':'red'}">${a.aktif?'Aktif':'Nonaktif'}</span></div>${a.username!==auth.user?`<div class="actions"><button class="btn secondary small" onclick="toggleAkun('${esc(a.username)}',${!a.aktif})">${a.aktif?'Nonaktifkan':'Aktifkan'}</button><button class="btn secondary small" onclick="resetAkun('${esc(a.username)}')">Reset password</button></div>`:'<div class="muted">Akun Anda</div>'}</div>`).join('')||'<p class="note">Belum ada akun.</p>'}
+function accHtml(){return accounts.map(a=>`<div class="item"><div class="itemtop"><span><b>${esc(a.username)}</b> · ${ROLE_LABEL[a.role]||a.role}${a.warga_id&&namaWarga(a.warga_id)?' · '+esc(namaWarga(a.warga_id)):''}</span><span class="pill ${a.aktif?'':'red'}">${a.aktif?'Aktif':'Nonaktif'}</span></div>${a.username!==auth.user?`<div class="actions"><button class="btn secondary small" onclick="toggleAkun('${esc(a.username)}',${!a.aktif})">${a.aktif?'Nonaktifkan':'Aktifkan'}</button><button class="btn secondary small" onclick="resetAkun('${esc(a.username)}')">Reset password</button>${a.role!=='admin'?`<button class="btn danger small" onclick="hapusAkun('${esc(a.username)}')">Hapus</button>`:''}</div>`:'<div class="muted">Akun Anda</div>'}</div>`).join('')||'<p class="note">Belum ada akun.</p>'}
 function loadAccounts(){srv('daftarAkun',[auth.token],r=>{accounts=r.akun||[];let el=document.getElementById('accList');if(el)el.innerHTML=accHtml()})}
 function showTemp(u,pw){showModal(`<h2>Password sementara</h2><p class="note">Bagikan secara pribadi kepada pemilik akun, jangan lewat grup. Password ini hanya ditampilkan sekali.</p><div class="item"><div class="muted">Nama pengguna</div><b>${esc(u)}</b><div class="muted" style="margin-top:8px">Password sementara</div><b style="font-size:18px;letter-spacing:1px;user-select:all">${esc(pw)}</b></div><div class="actions"><button class="btn" onclick="closeModal()">Selesai</button></div>`)}
 function doBuatAkun(e){e.preventDefault();srv('buatAkun',[auth.token,{username:acUser.value,role:acRole.value}],r=>{showTemp(r.username,r.password);acUser.value='';loadAccounts()})}
@@ -456,6 +481,13 @@ ${salah.length?`<div class="item"><b>No. HP tidak valid</b><div class="muted">${
 ${dobel.length?`<div class="item"><b>No. HP dobel (sudah dipakai warga lain)</b><div class="muted">${nm(dobel)}</div></div>`:''}`)
 }
 function toggleAkun(u,aktif){if(confirm((aktif?'Aktifkan':'Nonaktifkan')+' akun '+u+'?'))srv('ubahStatusAkun',[auth.token,u,aktif],()=>loadAccounts())}
+function hapusAkun(u){
+  if(!isAdmin())return;
+  if(!confirm('HAPUS akun '+u+' secara permanen?\n\nOrang ini tidak bisa masuk lagi. Data warga dan transaksi tidak ikut terhapus. Jika hanya ingin menutup akses sementara, gunakan Nonaktifkan.'))return;
+  let alasan=mintaAlasan('Alasan hapus akun '+u,true);
+  if(alasan===null)return;
+  srv('hapusAkun',[auth.token,u,alasan],()=>{alert('Akun '+u+' dihapus.');loadAccounts()})
+}
 function resetAkun(u){if(confirm('Reset password '+u+'? Sesi login akun itu akan berakhir.'))srv('resetPasswordAkun',[auth.token,u],r=>showTemp(u,r.password))}
 function openWarga(wid,m){let w=db.warga.find(x=>x.id===wid);if(!w)return;m=m||monthNow();
 let rows=DUES_CATS.map(c=>(c.k==='Arisan Ngaji'?[m+'-1',m+'-2']:[m]).map(p=>{
@@ -859,8 +891,8 @@ function editTx(id){
   if(!need('operator'))return;
   let t=db.transaksi.find(x=>x.id===id);
   if(!t){alert('Transaksi tidak ditemukan.');return}
+  go('transaksi');   // go() mereset editId, jadi set SETELAH pindah tab
   editId=id;
-  go('transaksi');
   setTimeout(()=>{
     try{
       document.getElementById('tTanggal').value=t.tanggal||dateNow();
@@ -1032,22 +1064,17 @@ function exportDailyReport(m){let rows=dailyTotals(m);download('rekap-harian-'+m
 function exportReport(m){let a=db.transaksi.filter(t=>t.tanggal.startsWith(m));download('laporan-'+m+'.csv','Tanggal,Jenis,Kategori,Sumber Dana,Uraian,Nominal,Metode,Dicatat oleh\n'+a.map(t=>[t.tanggal,t.jenis,t.kategori,t.sumberDana,t.uraian,t.nominal,t.metode,pencatatLabel(t)].map(csv).join(',')).join('\n'))}
 function csv(v){return '"'+String(v??'').replace(/"/g,'""')+'"'}
 function receipt(x){let t=db.transaksi.find(a=>a.id===x),w=db.warga.find(a=>a.id===t.wargaId);let win=window.open('','_blank');if(!win){alert('Izinkan pop-up untuk mencetak kuitansi.');return}win.document.write(`<html><head><title>Kuitansi</title><style>body{font:16px Arial;padding:28px}h2{text-align:center}.box{border:1px solid #555;padding:20px;max-width:500px;margin:auto}.line{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px dashed #bbb}</style></head><body><div class="box"><h2>KUITANSI PEMBAYARAN</h2><p>${esc(db.settings.rt)} / ${esc(db.settings.rw)} · ${esc(db.settings.desa)}</p><div class="line"><span>No. Transaksi</span><b>${esc(t.id)}</b></div><div class="line"><span>Tanggal</span><b>${esc(t.tanggal)}</b></div><div class="line"><span>Diterima dari / terkait</span><b>${esc(w?.nama||'-')}</b></div><div class="line"><span>Keterangan</span><b>${esc(t.uraian)}</b></div><div class="line"><span>Nominal</span><b>${rup(t.nominal)}</b></div><div class="line"><span>Metode</span><b>${esc(t.metode)}</b></div>${pencatatLabel(t)?`<div class="line"><span>Dicatat oleh</span><b>${esc(pencatatLabel(t))}</b></div>`:''}${t.sumberDana?`<div class="line"><span>Sumber Dana</span><b>${esc(t.sumberDana)}</b></div>`:'' }<p style="text-align:right;margin-top:40px">Bendahara,<br><br><br><b>${esc(db.settings.bendahara||'________________')}</b></p></div><script>var B=window.AndroidBridge||(window.opener&&window.opener.AndroidBridge);if(B){B.printHtml(document.documentElement.outerHTML)}else{window.print()}<\/script></body></html>`);win.document.close()}
-function lainPage(){let s=db.settings;return passwordCard()+userCard()+logHapusCard()+(canEdit()?`<details class="card"><summary><h2 style="margin:0;font-size:18px">Pengaturan RT/RW</h2><span class="chev">▾</span></summary><form onsubmit="saveSettings(event)">${isAdmin()?`<p class="note">Sebagai admin Anda dapat mengubah identitas RT/RW. Operator hanya mengubah tarif, saldo awal, dan bendahara.</p>
-<label>Nama RT</label><input id="sRt" value="${esc(s.rt||IDENTITAS.rt)}">
-<label>Nama RW</label><input id="sRw" value="${esc(s.rw||IDENTITAS.rw)}">
-<label>Desa / Kelurahan</label><input id="sDesa" value="${esc(s.desa||IDENTITAS.desa)}">
-<label>Kecamatan</label><input id="sKec" value="${esc(s.kecamatan||IDENTITAS.kecamatan)}">
-<label>Kabupaten / Kota</label><input id="sKota" value="${esc(s.kota||IDENTITAS.kota)}">`
-:`<p class="note">🔒 Identitas RT/RW dikunci. Hanya admin yang dapat mengubahnya.</p>
-<label>Nama RT 🔒</label><input id="sRt" readonly style="background:#e8eee8;color:#4b5563" value="${esc(s.rt||IDENTITAS.rt)}">
-<label>Nama RW 🔒</label><input id="sRw" readonly style="background:#e8eee8;color:#4b5563" value="${esc(s.rw||IDENTITAS.rw)}">
-<label>Desa / Kelurahan 🔒</label><input id="sDesa" readonly style="background:#e8eee8;color:#4b5563" value="${esc(s.desa||IDENTITAS.desa)}">
-<label>Kecamatan 🔒</label><input id="sKec" readonly style="background:#e8eee8;color:#4b5563" value="${esc(s.kecamatan||IDENTITAS.kecamatan)}">
-<label>Kabupaten / Kota 🔒</label><input id="sKota" readonly style="background:#e8eee8;color:#4b5563" value="${esc(s.kota||IDENTITAS.kota)}">`}<label>Tahun laporan</label><input id="sTahun" type="number" value="${s.tahun}"><h3 style="margin-top:16px">Saldo awal tiap kategori (Rp)</h3><p class="note">Saldo awal kas = jumlah semua kategori di bawah.</p>${IN_CATS.map((k,i)=>`<label>${k}</label><input id="sk${i}" type="number" value="${saldoKat(k)}">`).join('')}<h3 style="margin-top:16px">Tarif per KK (Rp)</h3><p class="note">Tarif berlaku sama untuk semua KK. Arisan Ngaji ditagih tiap 2 minggu (tgl 1–15 dan 16–akhir bulan).</p>${TARIF_CATS.map((k,i)=>`<label>${k} (${k==='Arisan Ngaji'?'per 2 minggu':'per bulan'})</label><input id="st${i}" type="number" min="0" value="${(s.tarif||{})[k]||0}">`).join('')}<label>Nama bendahara</label><input id="sBendahara" value="${esc(s.bendahara)}"><div class="actions"><button class="btn">Simpan pengaturan</button></div></form></details>`:'')+`
+function lainPage(){let s=db.settings;return passwordCard()+userCard()+logHapusCard()+(canEdit()?`<details class="card"><summary><h2 style="margin:0;font-size:18px">Pengaturan RT/RW</h2><span class="chev">▾</span></summary><form onsubmit="saveSettings(event)"><p class="note">🔒 Identitas RT/RW dikunci permanen untuk RT 003. Hanya tahun laporan, tarif, saldo awal, dan bendahara yang dapat diubah.</p>
+<label>Nama RT 🔒</label><input id="sRt" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.rt)}">
+<label>Nama RW 🔒</label><input id="sRw" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.rw)}">
+<label>Desa / Kelurahan 🔒</label><input id="sDesa" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.desa)}">
+<label>Kecamatan 🔒</label><input id="sKec" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.kecamatan)}">
+<label>Kabupaten / Kota 🔒</label><input id="sKota" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.kota)}">
+<label>Tahun laporan</label><input id="sTahun" type="number" value="${s.tahun}"><h3 style="margin-top:16px">Saldo awal tiap kategori (Rp)</h3><p class="note">Saldo awal kas = jumlah semua kategori di bawah.</p>${IN_CATS.map((k,i)=>`<label>${k}</label><input id="sk${i}" type="number" value="${saldoKat(k)}">`).join('')}<h3 style="margin-top:16px">Tarif per KK (Rp)</h3><p class="note">Tarif berlaku sama untuk semua KK. Arisan Ngaji ditagih tiap 2 minggu (tgl 1–15 dan 16–akhir bulan).</p>${TARIF_CATS.map((k,i)=>`<label>${k} (${k==='Arisan Ngaji'?'per 2 minggu':'per bulan'})</label><input id="st${i}" type="number" min="0" value="${(s.tarif||{})[k]||0}">`).join('')}<label>Nama bendahara</label><input id="sBendahara" value="${esc(s.bendahara)}"><div class="actions"><button class="btn">Simpan pengaturan</button></div></form></details>`:'')+`
 <details class="card"><summary><h3>Supabase · Database bersama</h3><span class="chev">▾</span></summary><p class="note">Data utama disimpan di database Supabase milik pengurus. Perangkat lain yang membuka aplikasi ini akan membaca database yang sama. Aplikasi memeriksa pembaruan otomatis setiap 30 detik; gunakan tombol perbarui untuk mengambil data terbaru sekarang.</p><div class="actions"><button class="btn" onclick="refreshCloud(false)">↻ Perbarui dari server</button></div></details>
 ${canEdit()?`<details class="card"><summary><h3>Cadangkan & pulihkan data</h3><span class="chev">▾</span></summary><p class="note">Backup JSON dapat diunduh sebagai salinan tambahan. Database utama berada di Supabase, bukan hanya di browser HP.</p><div class="actions"><button class="btn" onclick="backup()">Unduh backup</button><label class="btn secondary" style="display:inline-block;margin:0">Pulihkan backup<input type="file" accept="application/json" hidden onchange="restore(event)"></label></div><div class="actions"><button class="btn secondary" onclick="exportWarga()">Ekspor data warga CSV</button><button class="btn danger" onclick="resetAll()">Hapus seluruh data</button></div></details>`:''}
 <details class="card"><summary><h3>Tentang aplikasi</h3><span class="chev">▾</span></summary><p class="note">Aplikasi mengikuti workbook terbaru: Dashboard, Pengaturan, Data Warga, Transaksi, Tagihan Iuran, Laporan Bulanan, dan Kuitansi. Termasuk kategori Arisan Ngaji serta rekap saldo setiap kategori pemasukan dan pengeluaran.</p><div style="margin-top:14px;text-align:right;font-size:11px;letter-spacing:.6px;color:var(--muted);opacity:.7;font-style:italic">by : @argisk</div></details>`}
-function saveSettings(e){e.preventDefault();if(!need('operator'))return;let sk=IN_CATS.map((k,i)=>+document.getElementById('sk'+i).value||0);let ident=isAdmin()?{rt:(sRt.value||'').trim()||IDENTITAS.rt,rw:(sRw.value||'').trim()||IDENTITAS.rw,desa:(sDesa.value||'').trim()||IDENTITAS.desa,kecamatan:(sKec.value||'').trim()||IDENTITAS.kecamatan,kota:(sKota.value||'').trim()||IDENTITAS.kota}:{rt:db.settings.rt||IDENTITAS.rt,rw:db.settings.rw||IDENTITAS.rw,desa:db.settings.desa||IDENTITAS.desa,kecamatan:db.settings.kecamatan||IDENTITAS.kecamatan,kota:db.settings.kota||IDENTITAS.kota};if(isAdmin()){let alasan=mintaAlasan('Alasan ubah pengaturan (opsional)','');if(alasan===null)return;if(alasan){setAlasan(null,alasan,true);db._alasan._pengaturan=alasan}}let newTarif=Object.fromEntries(TARIF_CATS.map((k,i)=>[k,+document.getElementById('st'+i).value||0]));
+function saveSettings(e){e.preventDefault();if(!need('operator'))return;let sk=IN_CATS.map((k,i)=>+document.getElementById('sk'+i).value||0);let ident={...IDENTITAS};if(isAdmin()){let alasan=mintaAlasan('Alasan ubah pengaturan (opsional)','');if(alasan===null)return;if(alasan){setAlasan(null,alasan,true);db._alasan._pengaturan=alasan}}let newTarif=Object.fromEntries(TARIF_CATS.map((k,i)=>[k,+document.getElementById('st'+i).value||0]));
 let th=Object.assign({},db.settings.tarifHistory||{});
 th[monthNow()]=Object.assign({},newTarif);
 db.settings={...ident,tahun:+sTahun.value,saldo:sk.reduce((x,y)=>x+y,0),saldoKategori:Object.fromEntries(IN_CATS.map((k,i)=>[k,sk[i]])),tarif:newTarif,tarifHistory:th,bendahara:sBendahara.value,liburArisan:db.settings.liburArisan||[],tempatArisan:db.settings.tempatArisan||{},pemenangArisan:db.settings.pemenangArisan||{},...(db.settings.totalKK!=null?{totalKK:db.settings.totalKK}:{}),...(db.settings.pengumuman?{pengumuman:db.settings.pengumuman}:{})};save();render();alert('Pengaturan disimpan.')}
