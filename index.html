@@ -143,6 +143,7 @@ try{auth.token=sessionStorage.getItem('krt_token')||''}catch(e){}
 const ROLE_LABEL={admin:'Admin',operator:'Operator',viewer:'Viewer',warga:'Warga'};
 function canEdit(){return auth.role==='admin'||auth.role==='operator'}
 function isAdmin(){return auth.role==='admin'}
+function isWarga(){return auth.role==='warga'}
 function need(){if(canEdit())return true;alert(auth.role==='warga'?'Akun warga hanya dapat melihat data.':'Akun Viewer hanya dapat melihat data.');return false}
 function setAuth(t,u,r,temp){auth={token:t||'',user:u||'',role:r||'',temp:!!temp};try{t?sessionStorage.setItem('krt_token',t):sessionStorage.removeItem('krt_token')}catch(e){}renderHeaderUser();document.querySelector('.tabs').classList.toggle('hide',!t);let wt=document.querySelector('.tabs button[data-tab="warga"]');if(wt)wt.classList.toggle('hide',r==='warga')}
 function renderHeaderUser(){let el=document.getElementById('userBar');if(!el)return;el.innerHTML=auth.role?`Masuk: <b>${esc(auth.user)}</b> (${ROLE_LABEL[auth.role]||auth.role}) <button class="btn small" style="background:#ffffff33;margin-left:6px" onclick="doLogout()">Keluar</button>`:'Belum masuk'}
@@ -195,6 +196,7 @@ function mergeDb(base,local,server){
   const out=cloneDb(server);let konflik=0;
   for(const key of ['warga','transaksi']){const r=mergeById(base[key],local[key],server[key]);out[key]=r.arr;konflik+=r.konflik}
   const r=mergeSettings(base.settings||{},local.settings||{},server.settings||{});out.settings=r.obj;konflik+=r.konflik;
+  if(local&&local._alasan&&typeof local._alasan==='object') out._alasan=Object.assign({},local._alasan);
   return {db:out,konflik};
 }
 function persistPending(){try{localStorage.setItem(PENDING_KEY,JSON.stringify({user:auth.user,savedAt:Date.now(),base:baseDb,local:db}))}catch(e){}}
@@ -257,8 +259,13 @@ function setSyncStatus(message,good=true){
 }
 function save(){
   kunciIdentitas();
-  if(!cloudReady){setSyncStatus('Belum terhubung ke server',false);return;}
-  if(!canEdit()){alert('Akun Viewer hanya dapat melihat data.');return;}
+  if(!canEdit()){alert(auth.role==='warga'?'Akun warga hanya dapat melihat data.':'Akun Viewer hanya dapat melihat data.');return;}
+  if(!cloudReady){
+    offlineDirty=true;persistPending();
+    setSyncStatus('Belum terhubung · perubahan ditampung di HP',false);updateOfflineBar();
+    if(!pendingAlerted){pendingAlerted=true;alert('Belum terhubung ke server. Perubahan ditampung di HP dan akan dikirim setelah koneksi pulih.')}
+    return;
+  }
   if(offlineDirty)persistPending();
   cloudPending=true;syncSave();
 }
@@ -280,10 +287,11 @@ function syncSave(){
     })
     .withFailureHandler(err=>{
       cloudSaving=false;
-      if(isNetErr(err)){queueOffline();return}
-      cloudPending=false;
-      setSyncStatus('Gagal menyimpan — periksa koneksi',false);
-      alert('Gagal menyimpan ke server: '+(err&&err.message?err.message:'Periksa koneksi internet.'));
+      queueOffline();
+      if(!isNetErr(err)){
+        setSyncStatus('Gagal menyimpan · akan dicoba lagi',false);
+        alert('Gagal menyimpan ke server: '+(err&&err.message?err.message:'Kesalahan server')+'. Perubahan ditampung di HP dan akan dikirim ulang otomatis.');
+      }
     })
     .saveDatabase({db:snapshot,revision:cloudRevision,token:auth.token});
 }
@@ -545,7 +553,16 @@ const IN_CATS=['Iuran Warga','Jimpitan Jaga','Arisan Ngaji','Dana Sosial','Kas M
 const DUES_CATS=[{k:'Iuran Warga'},{k:'Jimpitan Jaga'},{k:'Arisan Ngaji'},{k:'Dana Sosial'},{k:'Kas Musholla'}];
 const TARIF_CATS=['Iuran Warga','Jimpitan Jaga','Arisan Ngaji','Dana Sosial','Kas Musholla'];
 function arisanAktif(w){return !w||w.arisanAktif!==false}
-function tarif(w,k){if(k==='Arisan Ngaji'&&!arisanAktif(w))return 0;let t=Number((db.settings.tarif||{})[k])||0;return t||(k==='Iuran Warga'?Number(w.iuran)||0:0)}
+function tarif(w,k,periode){
+  if(k==='Arisan Ngaji'&&!arisanAktif(w))return 0;
+  let hist=db.settings.tarifHistory||{}, key=periode?String(periode).slice(0,7):'';
+  if(key&&hist[key]&&hist[key][k]!=null&&hist[key][k]!==''){
+    let t=Number(hist[key][k])||0;
+    return t||(k==='Iuran Warga'?Number(w.iuran)||0:0);
+  }
+  let t=Number((db.settings.tarif||{})[k])||0;
+  return t||(k==='Iuran Warga'?Number(w.iuran)||0:0);
+}
 function saldoKat(k){let sk=db.settings&&db.settings.saldoKategori;if(sk)return Number(sk[k])||0;return k==='Lain-lain'?Number((db.settings&&db.settings.saldo)||0):0}
 function paruhNow(){return +dateNow().slice(8,10)<=15?1:2}
 function periodNow(k){return k==='Arisan Ngaji'?monthNow()+'-'+paruhNow():monthNow()}
@@ -564,6 +581,19 @@ function setTempatArisan(p,wid){
   save();
   render();
 }
+function getPemenangArisan(p){return (db.settings.pemenangArisan||{})[p]||''}
+function setPemenangArisan(p,wid){
+  if(!need('operator'))return;
+  if(!db.settings.pemenangArisan||typeof db.settings.pemenangArisan!=='object')db.settings.pemenangArisan={};
+  if(!wid)delete db.settings.pemenangArisan[p];
+  else{
+    let ada=db.transaksi.some(t=>t.jenis==='Pemasukan'&&t.kategori==='Arisan Ngaji'&&periodOf(t)===p);
+    if(!ada&&!confirm('Belum ada setoran tercatat untuk periode ini. Tetap tetapkan pemenang?'))return;
+    db.settings.pemenangArisan[p]=wid;
+  }
+  save();render();
+}
+
 function namaWarga(wid){
   if(!wid) return '';
   let w=db.warga.find(x=>x.id===wid);
@@ -578,7 +608,13 @@ function toggleLibur(p){
     if(!confirm('Batalkan status libur untuk periode '+periodLabel('Arisan Ngaji',p)+'? Warga akan ditagih lagi.'))return;
     arr.splice(i,1);
   }else{
-    if(!confirm('Tandai periode '+periodLabel('Arisan Ngaji',p)+' sebagai LIBUR?\nWarga tidak akan ditagih untuk periode ini.'))return;
+    let sudahBayar=db.transaksi.filter(t=>t.jenis==='Pemasukan'&&t.kategori==='Arisan Ngaji'&&periodOf(t)===p);
+    let msg='Tandai periode '+periodLabel('Arisan Ngaji',p)+' sebagai LIBUR?\nWarga tidak akan ditagih untuk periode ini.';
+    if(sudahBayar.length){
+      let tot=sudahBayar.reduce((s,t)=>s+Number(t.nominal||0),0);
+      msg+='\n\nPERHATIAN: sudah ada '+sudahBayar.length+' pembayaran (total '+rup(tot)+') pada periode ini. Transaksi tetap ada di kas. Lanjutkan hanya jika memang libur dan pembayaran akan dikoreksi manual.';
+    }
+    if(!confirm(msg))return;
     arr.push(p);
   }
   db.settings.liburArisan=arr;
@@ -589,7 +625,7 @@ function duesOf(k,p){
   if(isLibur(k,p)) return []; // periode libur: tidak ada tagihan
   let m=p.slice(0,7);
   return active().filter(w=>!w.tanggal||w.tanggal.slice(0,7)<=m).map(w=>{
-    let tg=tarif(w,k),
+    let tg=tarif(w,k,p),
         pays=db.transaksi.filter(t=>t.jenis==='Pemasukan'&&t.kategori===k&&t.wargaId===w.id&&periodOf(t)===p).sort((x,y)=>String(x.tanggal).localeCompare(String(y.tanggal))),
         paid=pays.reduce((s,t)=>s+Number(t.nominal||0),0),run=0,tl='',tempatLunas='';
     if(k==='Arisan Ngaji'&&!arisanAktif(w)&&paid>0)tg=paid; // sudah ada pembayaran tercatat: tampil lunas, tidak ditagih lagi
@@ -739,7 +775,12 @@ let tempatTxt=tempat?' · Tempat: '+esc(namaWarga(tempat)):'';let d=duesOf(c.k,p
 <details class="card"><summary><h3>Saldo kas per kategori · ${db.settings.tahun}</h3><span class="chev">▾</span></summary><p class="note">Pengeluaran mengurangi kategori sumber dana yang dipilih saat transaksi dicatat.</p>${categoryBalances().map(c=>`<div class="item ${c.kategori==='Kas Musholla'?'income':''}"><div class="itemtop"><b>${esc(c.kategori)}</b><b class="${c.saldo<0?'negative':'positive'}">${rup(c.saldo)}</b></div><div class="muted">Saldo awal ${rup(c.awal)} · <span class="link" style="cursor:pointer;color:#16a34a;font-weight:700" onclick="openPemasukanByKategori('${esc(c.kategori)}','${esc(String(db.settings.tahun))}')" title="Ketuk untuk lihat rincian pemasukan">Pemasukan ${rup(c.masuk)}</span> · <span class="link negative" style="cursor:pointer;color:#b42318;font-weight:700" onclick="openPengeluaranBySumber('${esc(c.kategori)}','${esc(String(db.settings.tahun))}')" title="Ketuk untuk lihat rincian pengeluaran">Pengeluaran ${rup(c.keluar)}</span></div></div>`).join('')}</details>
 <details class="card"><summary><h3>Transaksi terbaru</h3><span class="chev">▾</span></summary>${db.transaksi.slice().sort((a,b)=>{let c=String(b.tanggal||'').localeCompare(String(a.tanggal||''));return c!==0?c:String(b.id||'').localeCompare(String(a.id||''))}).slice(0,5).map(txItem).join('')||'<div class="empty">Belum ada transaksi.</div>'}</details>
 ${canEdit()?`<details class="card"><summary><h3>Mulai gunakan</h3><span class="chev">▾</span></summary><p class="note">Tambahkan data warga terlebih dahulu, lalu catat pembayaran iuran dan transaksi kas. Data tersimpan di Supabase dan dipakai bersama oleh semua perangkat pengurus.</p><div class="actions"><button class="btn" onclick="go('warga')">+ Tambah warga</button><button class="btn secondary" onclick="go('transaksi')">+ Catat transaksi</button></div></details>`:''}`}
-function go(t){if(t!=='transaksi'){editId=null;if(typeof txListLimit!=='undefined')txListLimit=50}tab=t;render()}
+function go(t){
+  if(t!==tab||t!=='transaksi')editId=null;
+  if(t!=='transaksi'&&typeof txListLimit!=='undefined')txListLimit=50;
+  tab=t;render();
+  if(t==='transaksi'&&!editId){try{batalEditTx()}catch(e){}}
+}
 function wargaPage(){return `${canEdit()?`<div class="card" id="wFormDetails" style="border-left:5px solid #16a34a"><h3 id="wFormTitle" style="margin:0 0 10px">➕ Tambah Warga</h3><form onsubmit="saveWarga(event)"><input type="hidden" id="wId"><label>Nama kepala keluarga *</label><input id="wNama" required placeholder="Nama lengkap"><label>Alamat / Blok</label><input id="wAlamat" placeholder="Alamat"><label>No. HP</label><input id="wHp" inputmode="tel"><div class="row"><div><label>Tanggal bergabung</label><input id="wTanggal" type="date" value="${dateNow()}"></div><div><label>Status</label><select id="wStatus"><option>Aktif</option><option>Nonaktif</option></select></div></div><label>Arisan Ngaji</label><select id="wArisan"><option value="Aktif">Aktif · ikut arisan, ditagih</option><option value="Nonaktif">Nonaktif · tidak ikut, tidak ditagih</option></select><label>Nama anggota / penerima (opsional)</label><input id="wAnggota" placeholder="Nama anggota keluarga"><label>Catatan</label><input id="wCatatan"><div class="actions"><button class="btn" type="submit">Simpan warga</button><button class="btn secondary" type="reset" onclick="clearW()">Kosongkan</button></div></form></div>`:''}<div class="card"><h2>Data Warga / Kepala Keluarga</h2><input class="search" id="wSearch" placeholder="Cari nama atau alamat..." oninput="filterWarga()"><div id="wList">${wargaList(db.warga)}</div></div>`}
 function wargaList(arr){return arr.length?arr.map(w=>`<div class="item"><div class="itemtop"><b class="link" onclick="openWarga('${w.id}')">${esc(w.nama)}</b><span class="pill">${esc(w.status)}</span></div><div style="margin:4px 0"><span class="pill ${arisanAktif(w)?'green':'amber'}">Arisan Ngaji: ${arisanAktif(w)?'Aktif':'Nonaktif'}</span></div><div class="muted">${w.hp?esc(w.hp):'Belum ada no. HP'}</div><div class="muted">${esc(w.alamat||'-')}${w.anggota?' · Anggota: '+esc(w.anggota):''}</div><div class="actions"><button class="btn secondary small" onclick="openWarga('${w.id}')">Lihat iuran</button>${canEdit()?`<button class="btn secondary small" onclick="toggleArisanWarga('${w.id}')">${arisanAktif(w)?'Nonaktifkan Arisan':'Aktifkan Arisan'}</button>`:''}${canEdit()?`<button class="btn secondary small" onclick="editW('${w.id}')">Edit</button>`:''}${canEdit()?`<button class="btn danger small" onclick="delW('${w.id}')">Hapus</button>`:''}</div></div>`).join(''):'<div class="empty">Belum ada data warga.</div>'}
 function filterWarga(){let q=document.getElementById('wSearch').value.toLowerCase();document.getElementById('wList').innerHTML=wargaList(db.warga.filter(w=>(w.nama+w.alamat).toLowerCase().includes(q)))}
@@ -767,7 +808,7 @@ function delW(x){if(!need('operator'))return;let w=db.warga.find(a=>a.id===x);if
 function transaksiPage(){return `${canEdit()?`<div class="card"><h2 id="txFormTitle">Catat Transaksi</h2><form onsubmit="saveTx(event)"><label>Tanggal *</label><input id="tTanggal" type="date" value="${dateNow()}" required><div class="row"><div><label>Jenis *</label><select id="tJenis" onchange="categoryOptions()"><option>Pemasukan</option><option>Pengeluaran</option></select></div><div><label>Kategori</label><select id="tKategori" onchange="togglePeriode()"></select></div></div><label id="sourceLabel" class="hide">Sumber dana (kategori pemasukan) *</label><select id="tSumber" class="hide"><option value="">— Pilih sumber dana —</option>${IN_CATS.map(x=>`<option>${x}</option>`).join('')}</select><label>Warga (khusus iuran)</label><select id="tWarga"><option value="">— Tidak terkait warga —</option>${db.warga.map(w=>`<option value="${esc(w.id)}">${esc(w.nama)} (${esc(w.id)})</option>`).join('')}</select><label>Periode iuran (YYYY-MM)</label><input id="tPeriode" type="month" value="${monthNow()}"><div id="halfBox" class="hide"><label>Paruh bulan (Arisan Ngaji, per 2 minggu)</label><select id="tParuh"><option value="1" ${paruhNow()===1?'selected':''}>1 · tgl 1–15</option><option value="2" ${paruhNow()===2?'selected':''}>2 · tgl 16–akhir</option></select></div><label>Uraian / keterangan *</label><input id="tUraian" required placeholder="Contoh: Bayar listrik bulan ini"><div class="row"><div><label>Nominal (Rp) *</label><input id="tNominal" type="number" min="1" required></div><div><label>Metode</label><select id="tMetode">${METHODS.map(x=>`<option>${x}</option>`).join('')}</select></div></div><label>Dicatat oleh 🔒</label><input id="tPencatat" readonly style="background:#e8eee8;color:#4b5563" value="${esc(pencatatNow())}"><div class="actions"><button class="btn" type="submit" id="txSubmitBtn">Simpan transaksi</button><button type="button" class="btn secondary hide" id="txCancelEdit" onclick="batalEditTx()">Batal ubah</button></div></form></div>`:''}<details class="card" open><summary><h3>Riwayat Transaksi</h3><span class="chev">▾</span></summary><input class="search" id="txSearch" placeholder="Cari transaksi..." oninput="filterTx()"><div id="txList">${txList(db.transaksi)}</div></details>`}
 function categoryOptions(){let inc=IN_CATS,out=OUT_CATS;tKategori.innerHTML=(tJenis.value==='Pemasukan'?inc:out).map(x=>`<option>${x}</option>`).join('');let exp=tJenis.value==='Pengeluaran';tSumber.classList.toggle('hide',!exp);sourceLabel.classList.toggle('hide',!exp);tSumber.required=exp;togglePeriode()}
 function togglePeriode(){halfBox.classList.toggle('hide',!(tJenis.value==='Pemasukan'&&tKategori.value==='Arisan Ngaji'))}
-function saveTx(e){e.preventDefault();if(!need('operator'))return;if(tJenis.value==='Pengeluaran'&&!tSumber.value){alert('Pilih sumber dana kategori pemasukan.');return}let nom=+tNominal.value;if(!(nom>0)||!isFinite(nom)){alert('Nominal harus angka positif.');return}if(tJenis.value==='Pengeluaran'){let c=categoryBalances(tTanggal.value.slice(0,4)).find(x=>x.kategori===tSumber.value);if(c&&nom>c.saldo&&!confirm('Saldo '+tSumber.value+' hanya '+rup(c.saldo)+'. Pengeluaran ini membuat saldo kategori minus. Tetap simpan?'))return}let isEdit=!!editId;let alasan=null;if(isEdit){alasan=mintaAlasan('Alasan perubahan transaksi',true);if(alasan===null)return}let base=isEdit?(db.transaksi.find(x=>x.id===editId)||{}):{};let t={id:isEdit?editId:id('TRX'),tanggal:tTanggal.value,jenis:tJenis.value,kategori:tKategori.value,sumberDana:tJenis.value==='Pengeluaran'?tSumber.value:'',wargaId:tWarga.value,periode:(tJenis.value==='Pemasukan'&&tKategori.value==='Arisan Ngaji')?tPeriode.value+'-'+tParuh.value:tPeriode.value,uraian:tUraian.value.trim(),nominal:nom,metode:tMetode.value,dicatatOleh:base.dicatatOleh||auth.user,dicatatPeran:base.dicatatPeran||auth.role};if(isEdit){setAlasan(t.id,alasan);let i=db.transaksi.findIndex(x=>x.id===t.id);if(i>=0)db.transaksi[i]=Object.assign({},base,t);else db.transaksi.push(t);editId=null}else{db.transaksi.push(t)}save();render();alert(isEdit?'Perubahan transaksi disimpan.':'Transaksi tersimpan.')}
+function saveTx(e){e.preventDefault();if(!need('operator'))return;if(window._txSaving)return;window._txSaving=true;try{if(tJenis.value==='Pengeluaran'&&!tSumber.value){alert('Pilih sumber dana kategori pemasukan.');return}let nom=+tNominal.value;if(!(nom>0)||!isFinite(nom)){alert('Nominal harus angka positif.');return}if(tJenis.value==='Pengeluaran'){let c=categoryBalances(tTanggal.value.slice(0,4)).find(x=>x.kategori===tSumber.value);if(c&&nom>c.saldo&&!confirm('Saldo '+tSumber.value+' hanya '+rup(c.saldo)+'. Pengeluaran ini membuat saldo kategori minus. Tetap simpan?'))return}let isEdit=!!editId;let alasan=null;if(isEdit){alasan=mintaAlasan('Alasan perubahan transaksi',true);if(alasan===null)return}let base=isEdit?(db.transaksi.find(x=>x.id===editId)||{}):{};let t={id:isEdit?editId:id('TRX'),tanggal:tTanggal.value,jenis:tJenis.value,kategori:tKategori.value,sumberDana:tJenis.value==='Pengeluaran'?tSumber.value:'',wargaId:tWarga.value,periode:(tJenis.value==='Pemasukan'&&tKategori.value==='Arisan Ngaji')?tPeriode.value+'-'+tParuh.value:tPeriode.value,uraian:tUraian.value.trim(),nominal:nom,metode:tMetode.value,dicatatOleh:base.dicatatOleh||auth.user,dicatatPeran:base.dicatatPeran||auth.role};if(isEdit){setAlasan(t.id,alasan);let i=db.transaksi.findIndex(x=>x.id===t.id);if(i>=0)db.transaksi[i]=Object.assign({},base,t);else db.transaksi.push(t);editId=null}else{db.transaksi.push(t)}save();render();alert(isEdit?'Perubahan transaksi disimpan.':'Transaksi tersimpan.')}finally{window._txSaving=false}}
 function pencatatLabel(t){
   if(t&&t.dicatatOleh){
     if(t.dicatatPeran==='admin')return t.dicatatOleh==='admin'?'Admin':'Admin · '+t.dicatatOleh;
@@ -894,7 +935,7 @@ function periodsUpTo(k,upto){
   let months=[];
   let y=ey, m=em;
   // Collect month keys backwards, then reverse MONTHS only (not the half-month periods).
-  for(let i=0;i<25;i++){
+  for(let i=0;i<120;i++){
     months.push(y+'-'+String(m).padStart(2,'0'));
     m--; if(m<1){m=12;y--;}
   }
@@ -919,7 +960,7 @@ function unpaidBefore(wid,k,upto){
     if(isLibur(k,p)) continue; // skip libur
     // skip periods before warga joined
     if(w.tanggal && w.tanggal.slice(0,7)>p.slice(0,7)) continue;
-    let tg=tarif(w,k);
+    let tg=tarif(w,k,p);
     if(tg<=0) continue;
     let paid=db.transaksi.filter(t=>t.jenis==='Pemasukan'&&t.kategori===k&&t.wargaId===wid&&periodOf(t)===p).reduce((s,t)=>s+Number(t.nominal||0),0);
     let left=Math.max(0,tg-paid);
@@ -1006,7 +1047,10 @@ function lainPage(){let s=db.settings;return passwordCard()+userCard()+logHapusC
 <details class="card"><summary><h3>Supabase · Database bersama</h3><span class="chev">▾</span></summary><p class="note">Data utama disimpan di database Supabase milik pengurus. Perangkat lain yang membuka aplikasi ini akan membaca database yang sama. Aplikasi memeriksa pembaruan otomatis setiap 30 detik; gunakan tombol perbarui untuk mengambil data terbaru sekarang.</p><div class="actions"><button class="btn" onclick="refreshCloud(false)">↻ Perbarui dari server</button></div></details>
 ${canEdit()?`<details class="card"><summary><h3>Cadangkan & pulihkan data</h3><span class="chev">▾</span></summary><p class="note">Backup JSON dapat diunduh sebagai salinan tambahan. Database utama berada di Supabase, bukan hanya di browser HP.</p><div class="actions"><button class="btn" onclick="backup()">Unduh backup</button><label class="btn secondary" style="display:inline-block;margin:0">Pulihkan backup<input type="file" accept="application/json" hidden onchange="restore(event)"></label></div><div class="actions"><button class="btn secondary" onclick="exportWarga()">Ekspor data warga CSV</button><button class="btn danger" onclick="resetAll()">Hapus seluruh data</button></div></details>`:''}
 <details class="card"><summary><h3>Tentang aplikasi</h3><span class="chev">▾</span></summary><p class="note">Aplikasi mengikuti workbook terbaru: Dashboard, Pengaturan, Data Warga, Transaksi, Tagihan Iuran, Laporan Bulanan, dan Kuitansi. Termasuk kategori Arisan Ngaji serta rekap saldo setiap kategori pemasukan dan pengeluaran.</p><div style="margin-top:14px;text-align:right;font-size:11px;letter-spacing:.6px;color:var(--muted);opacity:.7;font-style:italic">by : @argisk</div></details>`}
-function saveSettings(e){e.preventDefault();if(!need('operator'))return;let sk=IN_CATS.map((k,i)=>+document.getElementById('sk'+i).value||0);let ident=isAdmin()?{rt:(sRt.value||'').trim()||IDENTITAS.rt,rw:(sRw.value||'').trim()||IDENTITAS.rw,desa:(sDesa.value||'').trim()||IDENTITAS.desa,kecamatan:(sKec.value||'').trim()||IDENTITAS.kecamatan,kota:(sKota.value||'').trim()||IDENTITAS.kota}:{rt:db.settings.rt||IDENTITAS.rt,rw:db.settings.rw||IDENTITAS.rw,desa:db.settings.desa||IDENTITAS.desa,kecamatan:db.settings.kecamatan||IDENTITAS.kecamatan,kota:db.settings.kota||IDENTITAS.kota};if(isAdmin()){let alasan=mintaAlasan('Alasan ubah pengaturan (opsional)','');if(alasan===null)return;if(alasan){setAlasan(null,alasan,true);db._alasan._pengaturan=alasan}}db.settings={...ident,tahun:+sTahun.value,saldo:sk.reduce((x,y)=>x+y,0),saldoKategori:Object.fromEntries(IN_CATS.map((k,i)=>[k,sk[i]])),tarif:Object.fromEntries(TARIF_CATS.map((k,i)=>[k,+document.getElementById('st'+i).value||0])),bendahara:sBendahara.value,liburArisan:db.settings.liburArisan||[],tempatArisan:db.settings.tempatArisan||{},...(db.settings.pengumuman?{pengumuman:db.settings.pengumuman}:{})};save();render();alert('Pengaturan disimpan.')}
+function saveSettings(e){e.preventDefault();if(!need('operator'))return;let sk=IN_CATS.map((k,i)=>+document.getElementById('sk'+i).value||0);let ident=isAdmin()?{rt:(sRt.value||'').trim()||IDENTITAS.rt,rw:(sRw.value||'').trim()||IDENTITAS.rw,desa:(sDesa.value||'').trim()||IDENTITAS.desa,kecamatan:(sKec.value||'').trim()||IDENTITAS.kecamatan,kota:(sKota.value||'').trim()||IDENTITAS.kota}:{rt:db.settings.rt||IDENTITAS.rt,rw:db.settings.rw||IDENTITAS.rw,desa:db.settings.desa||IDENTITAS.desa,kecamatan:db.settings.kecamatan||IDENTITAS.kecamatan,kota:db.settings.kota||IDENTITAS.kota};if(isAdmin()){let alasan=mintaAlasan('Alasan ubah pengaturan (opsional)','');if(alasan===null)return;if(alasan){setAlasan(null,alasan,true);db._alasan._pengaturan=alasan}}let newTarif=Object.fromEntries(TARIF_CATS.map((k,i)=>[k,+document.getElementById('st'+i).value||0]));
+let th=Object.assign({},db.settings.tarifHistory||{});
+th[monthNow()]=Object.assign({},newTarif);
+db.settings={...ident,tahun:+sTahun.value,saldo:sk.reduce((x,y)=>x+y,0),saldoKategori:Object.fromEntries(IN_CATS.map((k,i)=>[k,sk[i]])),tarif:newTarif,tarifHistory:th,bendahara:sBendahara.value,liburArisan:db.settings.liburArisan||[],tempatArisan:db.settings.tempatArisan||{},pemenangArisan:db.settings.pemenangArisan||{},...(db.settings.totalKK!=null?{totalKK:db.settings.totalKK}:{}),...(db.settings.pengumuman?{pengumuman:db.settings.pengumuman}:{})};save();render();alert('Pengaturan disimpan.')}
 function download(name,content,type='text/csv;charset=utf-8'){let b=new Blob(['\ufeff'+content],{type}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=name;a.click();URL.revokeObjectURL(u)}
 function backup(){download('backup-keuangan-rt-'+dateNow()+'.json',JSON.stringify(db,null,2),'application/json')}
 function restore(e){if(!need('operator'))return;let f=e.target.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{try{let x=JSON.parse(r.result);if(!x.settings||!Array.isArray(x.warga)||!Array.isArray(x.transaksi))throw 0;if(confirm('Pulihkan backup? Data saat ini akan diganti.')){db=x;save();render();alert('Backup berhasil dipulihkan.')}}catch(z){alert('File backup tidak valid.')}};r.readAsText(f)}
