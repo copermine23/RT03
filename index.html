@@ -110,7 +110,11 @@ const SUPABASE_KEY = 'sb_publishable_D5ln2629-5sxQUzek6-feg_ArmyMz1M';
     gantiUsername:['krt_ganti_username',['p_token','p_password','p_baru']],
     hapusAkun:['krt_hapus_akun',['p_token','p_username','p_alasan']],
     bacaAudit:['krt_baca_audit',['p_token','p_batas','p_sebelum']],
-    verifikasiAudit:['krt_verifikasi_audit',['p_token']]
+    verifikasiAudit:['krt_verifikasi_audit',['p_token']],
+    waktuServer:['krt_waktu_server',[]],
+    ambilData:['krt_ambil_data',['p_token','p_since']],
+    simpanTransaksi:['krt_simpan_transaksi',['p_payload']],
+    simpanData:['krt_simpan_data',['p_payload']]
   };
   function call(def,args){
     const body={};def[1].forEach((k,i)=>body[k]=args[i]===undefined?null:args[i]);
@@ -154,7 +158,7 @@ function closeModal(){document.getElementById('modal').classList.add('hide')}
 function srv(fn,args,ok){google.script.run.withSuccessHandler(ok).withFailureHandler(err=>{let m=(err&&err.message)||'Gagal terhubung ke server.';if(m.includes('Sesi login')){setAuth();loginMsg='Sesi login berakhir. Silakan masuk lagi.';loginShown=false;render()}alert(m)})[fn](...args)}
 let cloudReady=false,cloudSaving=false,cloudPending=false,cloudRevision=0,cloudRefreshing=false;
 /* ===== Antrean offline: perubahan yang gagal terkirim disimpan di HP lalu dikirim otomatis ===== */
-let baseDb=null,offlineDirty=false,mergeTries=0,pendingAlerted=false,pendingTimer=null,konflikInfo=0;
+let txRev={},txMaxRev=0,baseDb=null,offlineDirty=false,mergeTries=0,pendingAlerted=false,pendingTimer=null,konflikInfo=0;
 const PENDING_KEY='krt_pending_v1';
 function cloneDb(x){return JSON.parse(JSON.stringify(x))}
 function canon(x){if(Array.isArray(x))return '['+x.map(canon).join(',')+']';if(x&&typeof x==='object')return '{'+Object.keys(x).sort().map(k=>JSON.stringify(k)+':'+canon(x[k])).join(',')+'}';return JSON.stringify(x)}
@@ -201,7 +205,14 @@ function mergeDb(base,local,server){
   if(local&&local._alasan&&typeof local._alasan==='object') out._alasan=Object.assign({},local._alasan);
   return {db:out,konflik};
 }
-function persistPending(){try{localStorage.setItem(PENDING_KEY,JSON.stringify({user:auth.user,savedAt:Date.now(),base:baseDb,local:db}))}catch(e){}}
+function ringkasTx(base,local){
+  const B=new Map(((base&&base.transaksi)||[]).map(x=>[x.id,x])),L=new Map(((local&&local.transaksi)||[]).map(x=>[x.id,x]));
+  const bt=[],lt=[];
+  for(const [id,l] of L){const b=B.get(id);if(!b||canon(b)!==canon(l)){if(b)bt.push(b);lt.push(l)}}
+  for(const [id,b] of B)if(!L.has(id))bt.push(b);
+  return {bt,lt};
+}
+function persistPending(){try{const r=ringkasTx(baseDb,db);localStorage.setItem(PENDING_KEY,JSON.stringify({user:auth.user,savedAt:Date.now(),base:Object.assign({},baseDb,{transaksi:r.bt}),local:Object.assign({},db,{transaksi:r.lt})}))}catch(e){}}
 function clearPending(){try{localStorage.removeItem(PENDING_KEY)}catch(e){}}
 function updateOfflineBar(){
   const el=document.getElementById('offlineBar');if(!el)return;
@@ -233,12 +244,12 @@ function mergeAndRetry(){
     .withSuccessHandler(r=>{
       if(!(r&&r.ok&&r.db)){syncFail('Gagal memuat data terbaru dari server. Data akan dimuat ulang, lalu ulangi input Anda.');return}
       const m=mergeDb(baseDb||r.db,db,r.db);
-      db=m.db;kunciIdentitas();baseDb=cloneDb(r.db);cloudRevision=r.revision||0;konflikInfo+=m.konflik;
+      db=m.db;kunciIdentitas();baseDb=cloneDb(r.db);cloudRevision=r.revision||0;txRev=r.revisions||{};txMaxRev=r.maxRev||0;konflikInfo+=m.konflik;
       cloudPending=true;syncSave();
       const a=document.activeElement;if(!(a&&['INPUT','SELECT','TEXTAREA'].includes(a.tagName)))render();
     })
     .withFailureHandler(e=>{if(isNetErr(e))queueOffline();else syncFail('Gagal memuat data terbaru dari server. Data akan dimuat ulang, lalu ulangi input Anda.')})
-    .getDatabase(auth.token);
+    .ambilData(auth.token,0);
 }
 function tryRestorePending(){
   let raw=null;try{raw=localStorage.getItem(PENDING_KEY)}catch(e){}
@@ -275,27 +286,138 @@ function syncFail(msg){
   cloudPending=false;cloudReady=false;setSyncStatus('Memuat ulang data…',false);
   alert(msg);refreshCloud(false);
 }
+/* ===== Simpan per baris: transaksi dikirim satu per satu (tambah/ubah/hapus), warga & pengaturan tetap dengan kunci revisi ===== */
+function txOps(base,local,alasan){
+  const al=(alasan&&typeof alasan==='object')?alasan:{};
+  const ar=id=>al[id]||al._massal||null;
+  const rv=id=>(id in txRev)?txRev[id]:null;
+  const B=new Map((base||[]).map(x=>[x.id,x])),ops=[];
+  for(const t of (local||[])){
+    const b=B.get(t.id);
+    if(!b)ops.push({op:'simpan',id:t.id,data:t,baseRev:null,alasan:ar(t.id)});
+    else if(canon(b)!==canon(t))ops.push({op:'simpan',id:t.id,data:t,baseRev:rv(t.id),alasan:ar(t.id)});
+    B.delete(t.id);
+  }
+  for(const id of B.keys())ops.push({op:'hapus',id:id,baseRev:rv(id),alasan:ar(id)});
+  return ops;
+}
+function dataBerubah(base,snap){
+  if(!base)return true;
+  return canon(base.warga)!==canon(snap.warga)||canon(base.settings)!==canon(snap.settings);
+}
+function terapkanHasilTx(ops,hasil,snapshot){
+  const opMap=new Map(ops.map(o=>[o.id,o]));
+  const baseMap=new Map(((baseDb&&baseDb.transaksi)||[]).map(x=>[x.id,x]));
+  const snap=new Map((snapshot.transaksi||[]).map(x=>[x.id,x]));
+  let konflik=0;
+  for(const h of hasil){
+    const o=opMap.get(h.id);if(!o)continue;
+    if(h.status==='ok'){
+      if(o.op==='hapus'){baseMap.delete(h.id);delete txRev[h.id]}
+      else{if(snap.has(h.id))baseMap.set(h.id,snap.get(h.id));if(h.rev!=null)txRev[h.id]=h.rev}
+    }else if(h.status==='sudah_hilang'){
+      baseMap.delete(h.id);delete txRev[h.id];
+    }else if(h.status==='konflik'&&h.data){
+      konflik++;
+      const k=db.transaksi.findIndex(x=>x.id===h.id);
+      if(k>=0)db.transaksi[k]=h.data;else db.transaksi.push(h.data);
+      baseMap.set(h.id,h.data);if(h.rev!=null)txRev[h.id]=h.rev;
+    }else if(h.status==='dihapus'){
+      konflik++;
+      db.transaksi=db.transaksi.filter(x=>x.id!==h.id);baseMap.delete(h.id);delete txRev[h.id];
+    }else{
+      baseDb.transaksi=[...baseMap.values()];
+      return {error:'Perubahan transaksi ditolak server ('+(h.status||'tidak dikenal')+'). Data akan dimuat ulang, lalu ulangi input Anda.'};
+    }
+  }
+  baseDb.transaksi=[...baseMap.values()];
+  return {konflik:konflik};
+}
+function deltaSama(result){
+  const m=new Map((db.transaksi||[]).map(x=>[x.id,x]));
+  for(const t of ((result.db&&result.db.transaksi)||[])){const l=m.get(t.id);if(!l||canon(l)!==canon(t))return false}
+  for(const id of (result.hapus||[]))if(m.has(id))return false;
+  return true;
+}
+function gabungDelta(result,gabung){
+  const d=result.db||structuredClone(defaults);
+  if(result.delta&&gabung){
+    const m=new Map((db.transaksi||[]).map(x=>[x.id,x]));
+    for(const t of (d.transaksi||[]))m.set(t.id,t);
+    for(const id of (result.hapus||[])){m.delete(id);delete txRev[id]}
+    Object.assign(txRev,result.revisions||{});
+    d.transaksi=[...m.values()];
+  }else{txRev=result.revisions||{}}
+  txMaxRev=result.maxRev||0;
+  return d;
+}
+function selesaiSimpan(){
+  cloudSaving=false;mergeTries=0;
+  if(db&&db._alasan)delete db._alasan;
+  if(typeof auditCache!=='undefined'){auditCache.loaded=false;auditCache.items=[];}
+  if(offlineDirty&&!cloudPending)selesaiAntrean();
+  setSyncStatus('Tersinkron ke Supabase');
+  if(cloudPending)syncSave();
+  else if(konflikInfo>0){let k=konflikInfo;konflikInfo=0;alert('Perubahan Anda sudah tersimpan. Catatan: '+k+' perubahan bentrok dengan perubahan dari perangkat lain, jadi data terbaru yang dipakai. Mohon periksa kembali.')}
+}
 function syncSave(){
   if(cloudSaving||!cloudPending||!cloudReady)return;
   cloudSaving=true;cloudPending=false;setSyncStatus('Menyimpan ke Supabase…');
   const snapshot=JSON.parse(JSON.stringify(db));
-  google.script.run
-    .withSuccessHandler(result=>{
-      cloudSaving=false;
-      if(result&&result.ok){cloudRevision=result.revision;baseDb=snapshot;mergeTries=0;if(db&&db._alasan)delete db._alasan;if(typeof auditCache!=='undefined'){auditCache.loaded=false;auditCache.items=[];}if(offlineDirty&&!cloudPending)selesaiAntrean();setSyncStatus('Tersinkron ke Supabase');if(cloudPending)syncSave();else if(konflikInfo>0){let k=konflikInfo;konflikInfo=0;alert('Perubahan Anda sudah tersimpan. Catatan: '+k+' perubahan bentrok dengan perubahan dari perangkat lain, jadi data terbaru yang dipakai. Mohon periksa kembali.')}return;}
-      if(result&&result.auth){persistPending();offlineDirty=false;updateOfflineBar();setAuth();loginMsg='Sesi login berakhir. Perubahan terakhir disimpan di HP dan akan dikirim setelah Anda masuk lagi.';loginShown=false;cloudPending=false;cloudReady=false;render();return;}
-      if(result&&result.forbidden){syncFail(result.message||'Akun Anda tidak berhak mengubah data.');return;}
-      mergeAndRetry();
-    })
-    .withFailureHandler(err=>{
-      cloudSaving=false;
-      queueOffline();
-      if(!isNetErr(err)){
-        setSyncStatus('Gagal menyimpan · akan dicoba lagi',false);
-        alert('Gagal menyimpan ke server: '+(err&&err.message?err.message:'Kesalahan server')+'. Perubahan ditampung di HP dan akan dikirim ulang otomatis.');
-      }
-    })
-    .saveDatabase({db:snapshot,revision:cloudRevision,token:auth.token});
+  if(!baseDb)baseDb=cloneDb(db);
+  const ops=txOps(baseDb.transaksi,snapshot.transaksi,snapshot._alasan);
+  const UKURAN=200;
+  const gagalJaringan=err=>{
+    cloudSaving=false;
+    queueOffline();
+    if(!isNetErr(err)){
+      setSyncStatus('Gagal menyimpan · akan dicoba lagi',false);
+      alert('Gagal menyimpan ke server: '+(err&&err.message?err.message:'Kesalahan server')+'. Perubahan ditampung di HP dan akan dikirim ulang otomatis.');
+    }
+  };
+  const sesiHabis=()=>{
+    cloudSaving=false;
+    persistPending();offlineDirty=false;updateOfflineBar();setAuth();
+    loginMsg='Sesi login berakhir. Perubahan terakhir disimpan di HP dan akan dikirim setelah Anda masuk lagi.';
+    loginShown=false;cloudPending=false;cloudReady=false;render();
+  };
+  const kirimData=()=>{
+    if(!dataBerubah(baseDb,snapshot)){selesaiSimpan();return}
+    google.script.run
+      .withSuccessHandler(result=>{
+        if(result&&result.ok){cloudRevision=result.revision;baseDb.warga=snapshot.warga;baseDb.settings=snapshot.settings;selesaiSimpan();return}
+        cloudSaving=false;
+        if(result&&result.auth){sesiHabis();return}
+        if(result&&result.forbidden){syncFail(result.message||'Akun Anda tidak berhak mengubah data.');return}
+        mergeAndRetry();
+      })
+      .withFailureHandler(gagalJaringan)
+      .simpanData({db:{settings:snapshot.settings,warga:snapshot.warga,_alasan:snapshot._alasan},revision:cloudRevision,token:auth.token});
+  };
+  const kirimTx=(mulai)=>{
+    if(mulai>=ops.length){
+      const a=document.activeElement;
+      if(konflikInfo>0&&!(a&&['INPUT','SELECT','TEXTAREA'].includes(a.tagName)))render();
+      kirimData();return;
+    }
+    const bagian=ops.slice(mulai,mulai+UKURAN);
+    google.script.run
+      .withSuccessHandler(result=>{
+        if(result&&result.ok){
+          const k=terapkanHasilTx(bagian,result.hasil||[],snapshot);
+          if(k.error){cloudSaving=false;syncFail(k.error);return}
+          konflikInfo+=k.konflik;
+          kirimTx(mulai+UKURAN);return;
+        }
+        cloudSaving=false;
+        if(result&&result.auth){sesiHabis();return}
+        if(result&&result.forbidden){syncFail(result.message||'Akun Anda tidak berhak mengubah data.');return}
+        syncFail('Gagal menyimpan transaksi. Data akan dimuat ulang, lalu ulangi input Anda.');
+      })
+      .withFailureHandler(gagalJaringan)
+      .simpanTransaksi({token:auth.token,ops:bagian});
+  };
+  kirimTx(0);
 }
 function refreshCloud(silent=false){
   if(cloudRefreshing||cloudSaving||cloudPending)return;
@@ -314,7 +436,8 @@ function refreshCloud(silent=false){
         let roleChanged=false;
         if(result.session&&(auth.role!==result.session.role||auth.user!==result.session.user||auth.temp!==!!result.session.temp)){setAuth(auth.token,result.session.user,result.session.role,result.session.temp);roleChanged=true}
         const incomingRevision=result.revision||0;
-        const changed=!cloudReady||incomingRevision!==cloudRevision;
+        const txBerubah=(result.maxRev||0)!==txMaxRev;
+        const changed=!cloudReady||incomingRevision!==cloudRevision||(txBerubah&&!(result.delta&&deltaSama(result)));
         if(changed){
           const active=document.activeElement;
           const editing=active&&(['INPUT','SELECT','TEXTAREA'].includes(active.tagName));
@@ -322,12 +445,15 @@ function refreshCloud(silent=false){
             setSyncStatus('Ada pembaruan dari HP lain · selesaikan isian lalu perbarui',false);
             return;
           }
-          db=result.db||structuredClone(defaults);kunciIdentitas();cloudRevision=incomingRevision;cloudReady=true;baseDb=cloneDb(db);tryRestorePending();
+          db=gabungDelta(result,cloudReady);kunciIdentitas();cloudRevision=incomingRevision;cloudReady=true;baseDb=cloneDb(db);tryRestorePending();
           render();
-        }else if(roleChanged)render();
+        }else{
+          if(txBerubah){Object.assign(txRev,result.revisions||{});txMaxRev=result.maxRev||0}
+          if(roleChanged)render();
+        }
         cloudReady=true;
         if(!pushDaftar){pushDaftar=true;daftarPush(0)}
-        setSyncStatus('Terhubung · sinkron '+new Date().toLocaleTimeString('id-ID'));
+        setSyncStatus('Terhubung · sinkron '+new Date().toLocaleTimeString('id-ID',{timeZone:TZ_WIB}));
       }else if(!silent){setSyncStatus('Gagal membaca database',false);alert('Tidak dapat membaca database.');}
     })
     .withFailureHandler(err=>{
@@ -337,7 +463,7 @@ function refreshCloud(silent=false){
         document.getElementById('app').innerHTML=`<div class="card"><h2>Gagal terhubung</h2><p class="note">${esc(msg)}</p><div class="actions"><button class="btn" onclick="doLogout(true)">Masuk ulang</button><button class="btn secondary" onclick="refreshCloud(false)">Coba lagi</button></div></div>`;
       }
     })
-    .getDatabase(auth.token);
+    .ambilData(auth.token,cloudReady?Math.max(0,txMaxRev-20):0);
 }
 function initCloud(){
   setSyncStatus('Menghubungkan ke server…');renderHeaderUser();
@@ -574,7 +700,13 @@ const BLN=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','De
 function tglID(s){let m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(s||''));return m?(+m[3])+' '+BLN[+m[2]-1]+' '+m[1]:(s||'-')}
 function rup(n){return new Intl.NumberFormat('id-ID',{style:'currency',currency:'IDR',maximumFractionDigits:0}).format(Number(n)||0)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function dateNow(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+const TZ_WIB='Asia/Jakarta';
+var waktuOffset=null,waktuSyncAt=0; /* selisih jam server - jam HP (ms); null = belum tersinkron, pakai jam HP */
+function nowWib(){return new Date(Date.now()+(waktuOffset||0))}
+function sinkronWaktu(){const t0=Date.now();try{google.script.run.withSuccessHandler(r=>{if(r&&r.epoch_ms){const t1=Date.now();waktuOffset=Number(r.epoch_ms)-Math.round((t0+t1)/2);waktuSyncAt=t1}}).withFailureHandler(()=>{}).waktuServer()}catch(e){}}
+function wibParts(d){try{const p={};new Intl.DateTimeFormat('en-CA',{timeZone:TZ_WIB,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(d||nowWib()).forEach(x=>{if(x.type!=='literal')p[x.type]=x.value});if(p.year&&p.month&&p.day)return p}catch(e){}
+  const l=new Date((d||nowWib()).getTime()+7*36e5);return{year:String(l.getUTCFullYear()),month:String(l.getUTCMonth()+1).padStart(2,'0'),day:String(l.getUTCDate()).padStart(2,'0')}}
+function dateNow(){const p=wibParts();return p.year+'-'+p.month+'-'+p.day}
 function monthNow(){return dateNow().slice(0,7)}
 function id(prefix){return prefix+'-'+Date.now().toString(36).toUpperCase()+Math.random().toString(36).slice(2,5).toUpperCase()}
 function active(){return db.warga.filter(w=>w.status!=='Nonaktif')}
@@ -745,8 +877,8 @@ function hapusPengumuman(){
 }
 
 function lastMonths(n){
-  let out=[],d=new Date();
-  for(let i=n-1;i>=0;i--){let x=new Date(d.getFullYear(),d.getMonth()-i,1);out.push(x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0'))}
+  let out=[],p=wibParts(),t0=(+p.year)*12+(+p.month-1);
+  for(let i=n-1;i>=0;i--){let t=t0-i;out.push(Math.floor(t/12)+'-'+String(t%12+1).padStart(2,'0'))}
   return out;
 }
 function monthChartHtml(){
@@ -784,7 +916,7 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid 
 th{background:#f3f4f6}.sign{margin-top:40px;text-align:right}
 @media print{button{display:none}body{padding:0}}
 </style></head><body>
-<button onclick="window.print()" style="padding:8px 14px;margin-bottom:12px">Cetak / Simpan PDF</button>
+<button onclick="var B=window.AndroidBridge||(window.opener&&window.opener.AndroidBridge);if(B){B.printHtml(document.documentElement.outerHTML)}else{window.print()}" style="padding:8px 14px;margin-bottom:12px">Cetak / Simpan PDF</button>
 <h1>Laporan Keuangan ${esc(s.rt||'')} / ${esc(s.rw||'')}</h1>
 <div class="meta">${esc(s.desa||'')} · ${esc(s.kecamatan||'')} · ${esc(s.kota||'')}<br>Periode: <b>${esc(bulan)}</b>${isF?' · Kategori: <b>'+esc(fk)+'</b>':''} · Dicetak: ${new Date().toLocaleString('id-ID',{timeZone:'Asia/Jakarta'})}</div>
 <div class="box"><b>Ringkasan</b><br>
@@ -1088,6 +1220,7 @@ function backup(){download('backup-keuangan-rt-'+dateNow()+'.json',JSON.stringif
 function restore(e){if(!need('operator'))return;let f=e.target.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{try{let x=JSON.parse(r.result);if(!x.settings||!Array.isArray(x.warga)||!Array.isArray(x.transaksi))throw 0;if(confirm('Pulihkan backup? Data saat ini akan diganti.')){db=x;save();render();alert('Backup berhasil dipulihkan.')}}catch(z){alert('File backup tidak valid.')}};r.readAsText(f)}
 function exportWarga(){download('data-warga.csv','ID KK,Nama,Alamat,No HP,Iuran Bulanan,Tanggal Bergabung,Status,Arisan Ngaji,Nama Anggota/Penerima,Catatan\n'+db.warga.map(w=>[w.id,w.nama,w.alamat,w.hp,w.iuran,w.tanggal,w.status,arisanAktif(w)?'Aktif':'Nonaktif',w.anggota,w.catatan].map(csv).join(',')).join('\n'))}
 function resetAll(){if(!need('operator'))return;if(confirm('Yakin hapus seluruh warga, transaksi, dan pengaturan? Unduh backup dulu jika diperlukan.')){db=structuredClone(defaults);save();render()}}
+sinkronWaktu();setInterval(sinkronWaktu,10*60*1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden&&Date.now()-waktuSyncAt>5*60*1000)sinkronWaktu()});
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>go(b.dataset.tab));
 document.getElementById('app').innerHTML=`<div class="card"><h2>Menghubungkan ke server…</h2><p class="note">Mohon tunggu sebentar. Data akan dimuat dari database bersama.</p><div class="actions" style="margin-top:14px"><button class="btn secondary" onclick="doLogout(true)">Masuk ulang</button></div></div>`;
 // Jika setelah 12 detik masih belum siap, tawarkan masuk ulang
