@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#bfe6d2"><title>Keuangan RT</title>
+<html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#bfe6d2"><link rel="manifest" href="manifest.webmanifest"><script>if("serviceWorker"in navigator)addEventListener("load",function(){navigator.serviceWorker.register("sw.js").catch(function(){})})</script><title>Keuangan RT</title>
 <style>
 :root{--green:#14532d;--green2:#166534;--ink:#10231a;--muted:#55675c;--line:rgba(255,255,255,.55);--red:#b42318;--blue:#1d4ed8;
 --glass:rgba(255,255,255,.52);--glass2:rgba(255,255,255,.38);--glass-brd:rgba(255,255,255,.72);--blur:blur(18px) saturate(170%)}
@@ -109,6 +109,9 @@ const SUPABASE_KEY = 'sb_publishable_D5ln2629-5sxQUzek6-feg_ArmyMz1M';
     gantiPassword:['krt_ganti_password',['p_token','p_lama','p_baru']],
     gantiUsername:['krt_ganti_username',['p_token','p_password','p_baru']],
     hapusAkun:['krt_hapus_akun',['p_token','p_username','p_alasan']],
+    daftarTerhapus:['krt_daftar_terhapus',['p_token']],
+    pulihkanTransaksi:['krt_pulihkan_transaksi',['p_token','p_id']],
+    eksporAudit:['krt_ekspor_audit',['p_token']],
     bacaAudit:['krt_baca_audit',['p_token','p_batas','p_sebelum']],
     verifikasiAudit:['krt_verifikasi_audit',['p_token']],
     waktuServer:['krt_waktu_server',[]],
@@ -149,12 +152,12 @@ try{auth.token=sessionStorage.getItem('krt_token')||''}catch(e){}
 const ROLE_LABEL={admin:'Admin',operator:'Operator',viewer:'Viewer',warga:'Warga'};
 function canEdit(){return auth.role==='admin'||auth.role==='operator'}
 function isAdmin(){return auth.role==='admin'}
-function isWarga(){return auth.role==='warga'}
 function need(){if(canEdit())return true;alert(auth.role==='warga'?'Akun warga hanya dapat melihat data.':'Akun Viewer hanya dapat melihat data.');return false}
-function setAuth(t,u,r,temp){auth={token:t||'',user:u||'',role:r||'',temp:!!temp};try{t?sessionStorage.setItem('krt_token',t):sessionStorage.removeItem('krt_token')}catch(e){}renderHeaderUser();document.querySelector('.tabs').classList.toggle('hide',!t);let wt=document.querySelector('.tabs button[data-tab="warga"]');if(wt)wt.classList.toggle('hide',r==='warga')}
+function setAuth(t,u,r,temp){if(!t)pushDaftar=false;auth={token:t||'',user:u||'',role:r||'',temp:!!temp};try{t?sessionStorage.setItem('krt_token',t):sessionStorage.removeItem('krt_token')}catch(e){}renderHeaderUser();document.querySelector('.tabs').classList.toggle('hide',!t);let wt=document.querySelector('.tabs button[data-tab="warga"]');if(wt)wt.classList.toggle('hide',r==='warga')}
 function renderHeaderUser(){let el=document.getElementById('userBar');if(!el)return;el.innerHTML=auth.role?`Masuk: <b>${esc(auth.user)}</b> (${ROLE_LABEL[auth.role]||auth.role}) <button class="btn small" style="background:#ffffff33;margin-left:6px" onclick="doLogout()">Keluar</button>`:'Belum masuk'}
 function showModal(h){document.getElementById('sheet').innerHTML=h;document.getElementById('modal').classList.remove('hide')}
-function closeModal(){document.getElementById('modal').classList.add('hide')}
+let konflikAktif=false;
+function closeModal(){if(konflikAktif){konflikList=[];konflikAktif=false}document.getElementById('modal').classList.add('hide')}
 function srv(fn,args,ok){google.script.run.withSuccessHandler(ok).withFailureHandler(err=>{let m=(err&&err.message)||'Gagal terhubung ke server.';if(m.includes('Sesi login')){setAuth();loginMsg='Sesi login berakhir. Silakan masuk lagi.';loginShown=false;render()}alert(m)})[fn](...args)}
 let cloudReady=false,cloudSaving=false,cloudPending=false,cloudRevision=0,cloudRefreshing=false;
 /* ===== Antrean offline: perubahan yang gagal terkirim disimpan di HP lalu dikirim otomatis ===== */
@@ -270,6 +273,45 @@ function setSyncStatus(message,good=true){
   const el=document.getElementById('syncStatus');
   if(el){el.textContent=message;el.style.color=good?'#dcfce7':'#ffe0a6';}
 }
+
+/* ===== Perbaikan: dialog konflik, transaksi terhapus, ekspor audit ===== */
+let konflikList=[];
+function tampilKonflik(){
+  if(!konflikList.length){closeModal();return}
+  const ring=t=>t?esc(t.tanggal||'')+' · '+esc(t.kategori||'')+' · '+rup(t.nominal||0)+(t.uraian?' · '+esc(t.uraian):''):'(dihapus)';
+  showModal('<h2>Perubahan bentrok</h2><p class="note">Transaksi ini juga diubah dari perangkat lain. Pilih versi yang dipakai.</p>'+konflikList.map((k,i)=>`<div class="item"><div class="muted">Server (terbaru): ${ring(k.server)}</div><div class="muted">Perubahan Anda: ${k.lokal?ring(k.lokal):'Anda menghapus transaksi ini'}</div><div class="actions"><button class="btn secondary" onclick="pakaiServer(${i})">Pakai versi server</button><button class="btn" onclick="pakaiLokal(${i})">Pakai perubahan saya</button></div></div>`).join('')+'<div class="actions"><button class="btn secondary" onclick="konflikList=[];closeModal()">Tutup (pakai versi server semua)</button></div>');
+  konflikAktif=true;
+}
+function pakaiServer(i){konflikList.splice(i,1);tampilKonflik()}
+function pakaiLokal(i){
+  const k=konflikList.splice(i,1)[0];if(!k)return;
+  const idx=db.transaksi.findIndex(x=>x.id===k.id);
+  if(k.lokal){if(idx>=0)db.transaksi[idx]=k.lokal;else db.transaksi.push(k.lokal);setAlasan(k.id,'Perubahan dipertahankan setelah bentrok dengan perangkat lain')}
+  else{db.transaksi=db.transaksi.filter(x=>x.id!==k.id);setAlasan(k.id,'Penghapusan dipertahankan setelah bentrok dengan perangkat lain')}
+  tampilKonflik();save();
+}
+let terhapus={loaded:false,loading:false,items:[]};
+function muatTerhapus(){
+  if(!isAdmin()||terhapus.loading)return;terhapus.loading=true;
+  google.script.run.withSuccessHandler(r=>{terhapus.loading=false;terhapus.loaded=true;terhapus.items=(r&&r.items)||[];render()})
+    .withFailureHandler(e=>{terhapus.loading=false;terhapus.loaded=true;alert((e&&e.message)||'Gagal memuat transaksi terhapus.')}).daftarTerhapus(auth.token);
+}
+function pulihkanTx(id){
+  if(!isAdmin()||!confirm('Pulihkan transaksi '+id+'?'))return;
+  srv('pulihkanTransaksi',[auth.token,id],()=>{alert('Transaksi dipulihkan.');terhapus.loaded=false;refreshCloud(true)});
+}
+function eksporAudit(){
+  srv('eksporAudit',[auth.token],r=>{
+    const a=(r&&r.items)||[];
+    download('jejak-audit-'+dateNow()+'.csv','Seq,Waktu,Oleh,Peran,Objek,Aksi,Ref,Perubahan,Alasan,Sebelum,Sesudah\n'+a.map(e=>[e.seq,e.waktu,e.oleh,e.peran,e.objek,e.aksi,e.ref_id,JSON.stringify(e.perubahan||''),e.alasan,JSON.stringify(e.sebelum||''),JSON.stringify(e.sesudah||'')].map(csv).join(',')).join('\n'));
+  });
+}
+function terhapusCard(){
+  if(!isAdmin())return '';
+  if(!terhapus.loaded&&!terhapus.loading)setTimeout(muatTerhapus,0);
+  const li=terhapus.items.map(x=>{const d=x.data||{};return `<div class="item"><div class="itemtop"><span><b>${esc(d.tanggal||'')}</b> · ${esc(d.kategori||'')} · ${rup(d.nominal||0)}</span><button class="btn secondary" onclick="pulihkanTx('${esc(x.id)}')">Pulihkan</button></div><div class="muted">${esc(d.uraian||'')} · ${esc(x.id)}</div></div>`}).join('')||'<div class="empty">Tidak ada transaksi terhapus.</div>';
+  return `<details class="card"><summary><h3>Transaksi terhapus &amp; ekspor audit</h3><span class="chev">▾</span></summary>${li}<div class="actions"><button class="btn secondary" onclick="eksporAudit()">Unduh jejak audit (CSV)</button></div></details>`;
+}
 function save(){
   kunciIdentitas();
   if(!canEdit()){alert(auth.role==='warga'?'Akun warga hanya dapat melihat data.':'Akun Viewer hanya dapat melihat data.');return;}
@@ -314,11 +356,12 @@ function terapkanHasilTx(ops,hasil,snapshot){
     const o=opMap.get(h.id);if(!o)continue;
     if(h.status==='ok'){
       if(o.op==='hapus'){baseMap.delete(h.id);delete txRev[h.id]}
-      else{if(snap.has(h.id))baseMap.set(h.id,snap.get(h.id));if(h.rev!=null)txRev[h.id]=h.rev}
+      else{const st={};if(h.data){if(h.data.dicatatOleh!=null)st.dicatatOleh=h.data.dicatatOleh;if(h.data.dicatatPeran!=null)st.dicatatPeran=h.data.dicatatPeran}if(snap.has(h.id))baseMap.set(h.id,Object.assign({},snap.get(h.id),st));const k2=db.transaksi.findIndex(x=>x.id===h.id);if(k2>=0&&(st.dicatatOleh||st.dicatatPeran))Object.assign(db.transaksi[k2],st);if(h.rev!=null)txRev[h.id]=h.rev}
     }else if(h.status==='sudah_hilang'){
       baseMap.delete(h.id);delete txRev[h.id];
     }else if(h.status==='konflik'&&h.data){
       konflik++;
+      konflikList.push({id:h.id,lokal:snap.get(h.id)||null,server:h.data});
       const k=db.transaksi.findIndex(x=>x.id===h.id);
       if(k>=0)db.transaksi[k]=h.data;else db.transaksi.push(h.data);
       baseMap.set(h.id,h.data);if(h.rev!=null)txRev[h.id]=h.rev;
@@ -342,6 +385,8 @@ function deltaSama(result){
 function gabungDelta(result,gabung){
   const d=result.db||structuredClone(defaults);
   if(result.delta&&gabung){
+    if(!d.settings)d.settings=db.settings;
+    if(!d.warga)d.warga=db.warga;
     const m=new Map((db.transaksi||[]).map(x=>[x.id,x]));
     for(const t of (d.transaksi||[]))m.set(t.id,t);
     for(const id of (result.hapus||[])){m.delete(id);delete txRev[id]}
@@ -358,7 +403,7 @@ function selesaiSimpan(){
   if(offlineDirty&&!cloudPending)selesaiAntrean();
   setSyncStatus('Tersinkron ke Supabase');
   if(cloudPending)syncSave();
-  else if(konflikInfo>0){let k=konflikInfo;konflikInfo=0;alert('Perubahan Anda sudah tersimpan. Catatan: '+k+' perubahan bentrok dengan perubahan dari perangkat lain, jadi data terbaru yang dipakai. Mohon periksa kembali.')}
+  else if(konflikInfo>0){let k=konflikInfo;konflikInfo=0;if(konflikList.length)tampilKonflik();else alert('Perubahan Anda sudah tersimpan. Catatan: '+k+' perubahan bentrok dengan perubahan dari perangkat lain, jadi data terbaru yang dipakai. Mohon periksa kembali.')}
 }
 function syncSave(){
   if(cloudSaving||!cloudPending||!cloudReady)return;
@@ -421,6 +466,7 @@ function syncSave(){
 }
 function refreshCloud(silent=false){
   if(cloudRefreshing||cloudSaving||cloudPending)return;
+  if(silent&&tab==='transaksi'&&['tNominal','tUraian'].some(id=>((document.getElementById(id)||{}).value||'').trim()))return;
   cloudRefreshing=true;
   google.script.run
     .withSuccessHandler(result=>{
@@ -441,9 +487,9 @@ function refreshCloud(silent=false){
         if(changed){
           const active=document.activeElement;
           const editing=active&&(['INPUT','SELECT','TEXTAREA'].includes(active.tagName));
-          if(editing&&cloudReady){
-            setSyncStatus('Ada pembaruan dari HP lain · selesaikan isian lalu perbarui',false);
-            return;
+          if((editing||formDirty)&&cloudReady){
+            if(silent){setSyncStatus('Ada pembaruan dari HP lain · selesaikan isian lalu perbarui',false);return}
+            if(!confirm('Ada isian yang belum disimpan. Memperbarui sekarang akan menimpa isian. Lanjut?'))return;
           }
           db=gabungDelta(result,cloudReady);kunciIdentitas();cloudRevision=incomingRevision;cloudReady=true;baseDb=cloneDb(db);tryRestorePending();
           render();
@@ -469,11 +515,11 @@ function initCloud(){
   setSyncStatus('Menghubungkan ke server…');renderHeaderUser();
   document.querySelector('.tabs').classList.toggle('hide',!auth.token);
   refreshCloud(false);
-  setInterval(()=>{if(auth.role)refreshCloud(true)},30000);
+  setInterval(()=>{if(auth.role&&!document.hidden)refreshCloud(true)},30000);document.addEventListener('visibilitychange',()=>{if(!document.hidden&&auth.role)refreshCloud(true)});
 }
 function renderLogin(){loginShown=true;document.getElementById('app').innerHTML=`<div class="card"><h2>Masuk</h2>${loginMsg?`<p class="note" style="color:var(--red)">${esc(loginMsg)}</p>`:''}<p class="note">Warga masuk dengan nomor HP yang terdaftar dan password dari pengurus.${setupDone?'':' <b>Akun admin belum disiapkan:</b> jalankan <code>select krt.setup_initial_admin();</code> di SQL Editor Supabase.'}</p><form onsubmit="doLogin(event)"><label>Nama pengguna / No. HP</label><input id="lgUser" autocomplete="username" autocapitalize="none" required><label>Password</label><input id="lgPass" type="password" autocomplete="current-password" required><div class="actions"><button class="btn" type="submit">Masuk</button></div></form></div>`}
 function doLogin(e){e.preventDefault();let b=e.target.querySelector('button');b.disabled=true;google.script.run.withSuccessHandler(r=>{b.disabled=false;if(r&&r.ok){loginMsg='';loginShown=false;setAuth(r.token,r.user,r.role,r.temp);document.getElementById('app').innerHTML='<div class="card"><h2>Memuat data…</h2></div>';cloudReady=false;cloudRefreshing=false;refreshCloud(false);if(r.temp)setTimeout(()=>openGantiPw(true),700)}else alert((r&&r.message)||'Gagal masuk.')}).withFailureHandler(err=>{b.disabled=false;alert((err&&err.message)||'Gagal terhubung ke server.')}).login(lgUser.value,lgPass.value)}
-function doLogout(local){if(local!==true&&offlineDirty){if(!confirm('Ada '+Math.max(1,diffCount(baseDb,db))+' perubahan yang belum terkirim ke server. Jika keluar sekarang, perubahan itu akan hilang.\n\nTetap keluar?'))return;selesaiAntrean();cloudPending=false}offlineDirty=false;updateOfflineBar();let tk=auth.token,pt=pushToken();if(local!==true&&tk){if(pt){let lanjut=()=>google.script.run.logout(tk);google.script.run.withSuccessHandler(lanjut).withFailureHandler(lanjut).hapusToken(tk,pt)}else google.script.run.logout(tk)}pushDaftar=false;closeModal();setAuth();db=structuredClone(defaults);cloudReady=false;cloudPending=false;auditCache={items:[],total:0,loading:false,loaded:false,filter:'Hapus'};loginMsg='';loginShown=false;document.getElementById('headTitle').textContent='Keuangan RT';document.getElementById('headSub').textContent='Catat kas, iuran, dan laporan warga';render()}
+function doLogout(local){if(local!==true&&offlineDirty){if(!confirm('Ada '+Math.max(1,diffCount(baseDb,db))+' perubahan yang belum terkirim ke server. Jika keluar sekarang, perubahan itu akan hilang.\n\nTetap keluar?'))return;selesaiAntrean();cloudPending=false}offlineDirty=false;terhapus={loaded:false,loading:false,items:[]};accounts=[];konflikList=[];konflikAktif=false;konflikInfo=0;formDirty=false;updateOfflineBar();let tk=auth.token,pt=pushToken();if(local!==true&&tk){if(pt){let lanjut=()=>google.script.run.logout(tk);google.script.run.withSuccessHandler(lanjut).withFailureHandler(lanjut).hapusToken(tk,pt)}else google.script.run.logout(tk)}pushDaftar=false;closeModal();setAuth();db=structuredClone(defaults);cloudReady=false;cloudPending=false;auditCache={items:[],total:0,loading:false,loaded:false,filter:'Hapus'};loginMsg='';loginShown=false;document.getElementById('headTitle').textContent='Keuangan RT';document.getElementById('headSub').textContent='Catat kas, iuran, dan laporan warga';render()}
 function openGantiPw(temp){if(auth.role==='viewer'&&auth.temp!==true){alert('Viewer hanya dapat mengganti password satu kali. Jika lupa, hubungi admin untuk reset password.');return;}showModal(`<h2>${temp===true?'Ganti password sementara':'Ganti password saya'}</h2>${temp===true?'<p class="note">Anda masuk dengan password sementara. Buat password pribadi sekarang.</p>':''}<form onsubmit="doGantiPw(event)"><label>Password lama</label><input id="pwLama" type="password" autocomplete="current-password" required><label>Password baru (minimal ${auth.role==='warga'?8:10} karakter)</label><input id="pwBaru" type="password" autocomplete="new-password" minlength="${auth.role==='warga'?8:10}" required><div class="actions"><button class="btn">Simpan password</button><button class="btn secondary" type="button" onclick="closeModal()">Nanti</button></div></form>`)}
 function doGantiPw(e){e.preventDefault();srv('gantiPassword',[auth.token,pwLama.value,pwBaru.value],()=>{alert('Password berhasil diganti. Silakan masuk kembali dengan password baru.');doLogout(true)})}
 function openGantiUsername(){
@@ -499,6 +545,14 @@ function auditIsiRingkas(e){
     return `Akun dihapus: <b>${esc(b.username||e.ref_id||'-')}</b>${b.role?' · '+esc(ROLE_LABEL[b.role]||b.role):''}`;
   }
   if(e.objek==='Akun'){
+    const u=e.ref_id||(e.sesudah&&e.sesudah.username)||'';
+    if(e.aksi==='Login')return `Login: <b>${esc(u)}</b>`;
+    if(e.aksi==='Terkunci')return `Akun terkunci: <b>${esc(u)}</b> (5× salah password)`;
+    if(e.aksi==='ResetPassword')return `Password direset oleh admin: <b>${esc(u)}</b>`;
+    if(e.aksi==='GantiPassword')return `Password diganti sendiri: <b>${esc(u)}</b>`;
+    if(e.aksi==='UbahStatus')return `Akun <b>${esc(u)}</b> ${(e.sesudah&&e.sesudah.aktif)?'diaktifkan':'dinonaktifkan'}`;
+    if(e.aksi==='Buat')return e.sesudah&&e.sesudah.jumlahAkunWarga?`Akun warga dibuat massal: <b>${esc(e.sesudah.jumlahAkunWarga)}</b> akun`:`Akun dibuat: <b>${esc(u)}</b>${e.sesudah&&e.sesudah.role?' · '+esc(ROLE_LABEL[e.sesudah.role]||e.sesudah.role):''}`;
+    if(e.aksi!=='GantiUsername')return `Akun <b>${esc(u)}</b> · ${esc(e.aksi||'')}`;
     return `Nama pengguna: <b>${esc((e.sebelum&&e.sebelum.username)||'-')}</b> → <b>${esc((e.sesudah&&e.sesudah.username)||'-')}</b>`;
   }
   if(e.objek==='Warga'){
@@ -513,7 +567,7 @@ function auditIsiRingkas(e){
     let nom=src.nominal!=null?rup(src.nominal):'';
     let tgl=src.tanggal||'',jns=src.jenis||'',kat=src.kategori||'';
     let w=src.wargaId&&namaWarga(src.wargaId)?namaWarga(src.wargaId):'';
-    let per=src.periode?periodOf(src):'';
+    let per=src.periode?periodLabel(src.kategori,periodOf(src)):'';
     return `<b>${esc(ura)}</b> · ${esc(jns)} ${esc(kat)} · <b>${nom}</b> · ${esc(tgl)}${w?' · '+esc(w):''}${per?' · periode '+esc(per):''}`;
   }
   if(e.objek==='Pengaturan'){
@@ -527,7 +581,7 @@ function auditIsiRingkas(e){
   return esc(e.ref_id||e.objek||'');
 }
 function auditItem(e){
-  let oleh=pencatatLabel({dicatatOleh:e.oleh,dicatatPeran:e.peran})||esc(e.oleh||'-');
+  let oleh=esc(pencatatLabel({dicatatOleh:e.oleh,dicatatPeran:e.peran})||e.oleh||'-');
   let warna=e.aksi==='Hapus'?'#b91c1c':(e.aksi==='Tambah'?'#166534':(e.aksi==='Langsung'?'#9a3412':'#1d4ed8'));
   let label=e.aksi==='Hapus'?'Dihapus':(e.aksi==='Tambah'?'Ditambah':(e.aksi==='Ubah'?'Diubah':e.aksi));
   let asal='';
@@ -566,14 +620,16 @@ function logHapusCard(){
   if(!isAdmin())return '';
   if(!auditCache.loaded&&!auditCache.loading)setTimeout(()=>muatAudit(true),0);
   let fil=auditCache.filter||'Hapus';
-  let list=auditCache.items.filter(e=>!fil||fil==='Semua'||e.aksi===fil);
+  let list=auditCache.items.filter(e=>!fil||fil==='Semua'||(fil==='Akun'?e.objek==='Akun':e.aksi===fil));
   let more=auditCache.items.length<auditCache.total;
-  return `<details class="card" open><summary><h3>Riwayat penghapusan & jejak audit (${auditCache.total||0})</h3><span class="chev">▾</span></summary>
+  return `<details class="card" open><summary><h3>Riwayat penghapusan & jejak audit (${list.length} tampil dari ${auditCache.total||0})</h3><span class="chev">▾</span></summary>
 <p class="note">Setiap transaksi/pembayaran, data warga, dan pengaturan yang ditambah/diubah/dihapus tercatat otomatis di server. Catatan tidak bisa diubah dari aplikasi. Hanya admin yang melihatnya.</p>
 <div class="actions" style="flex-wrap:wrap;gap:6px;margin-bottom:10px">
 <button class="btn ${fil==='Hapus'?'':'secondary'} small" onclick="auditCache.filter='Hapus';render()">Hapus</button>
 <button class="btn ${fil==='Tambah'?'':'secondary'} small" onclick="auditCache.filter='Tambah';render()">Tambah</button>
 <button class="btn ${fil==='Ubah'?'':'secondary'} small" onclick="auditCache.filter='Ubah';render()">Ubah</button>
+<button class="btn ${fil==='Pulihkan'?'':'secondary'} small" onclick="auditCache.filter='Pulihkan';render()">Pulihkan</button>
+<button class="btn ${fil==='Akun'?'':'secondary'} small" onclick="auditCache.filter='Akun';render()">Akun</button>
 <button class="btn ${fil==='Semua'?'':'secondary'} small" onclick="auditCache.filter='Semua';render()">Semua</button>
 <button class="btn secondary small" onclick="muatAudit(true)">↻ Muat ulang</button>
 <button class="btn secondary small" onclick="verifikasiAudit()">🔒 Verifikasi rantai</button>
@@ -622,7 +678,7 @@ let rows=DUES_CATS.map(c=>(c.k==='Arisan Ngaji'?[m+'-1',m+'-2']:[m]).map(p=>{
   let r=duesOf(c.k,p).find(x=>x.id===wid),st=!r?'na':r.left===0?'ok':r.paid>0?'part':'bad';
   return `<div class="item ${st==='bad'?'unpaid':st==='part'?'partial':st==='ok'?'paid':''}"><div class="itemtop"><b class="${st==='bad'?'negative':''}">${c.k}</b><span class="pill ${st==='bad'?'red':st==='part'?'amber':st==='ok'?'green':''}">${{ok:'Lunas',part:'Sebagian',bad:'Belum bayar',na:(c.k==='Arisan Ngaji'&&!arisanAktif(w)?'Nonaktif':'Tidak ditagih')}[st]}</span></div><div class="muted">${st==='na'&&c.k==='Arisan Ngaji'&&!arisanAktif(w)?'Tidak ikut Arisan Ngaji · tidak ditagih':periodLabel(c.k,p)}${tempatNm?' · Tempat: '+esc(tempatNm):''}${r?' · Tagihan '+rup(r.tagihan)+' · Dibayar '+rup(r.paid)+(r.left?' · Sisa <b class="negative">'+rup(r.left)+'</b>':''):''}</div>${st==='ok'&&r.tglLunas?`<div class="paidline">✓ Tanggal lunas: <b>${tglID(r.tglLunas)}</b>${r.tempatLunas?' · di rumah <b>'+esc(r.tempatLunas)+'</b>':''}</div>`:''}${r&&r.dicatat?`<div class="muted">Dicatat oleh: <b>${esc(r.dicatat)}</b></div>`:''}${r&&r.left>0&&canEdit()?`<div class="actions"><button class="btn small" onclick="quickPay('${wid}','${c.k}','${p}',${r.left},true)">Catat pembayaran</button></div>`:''}</div>`;
 }).join('')).join('');
-let hist=db.transaksi.filter(t=>t.wargaId===wid&&t.jenis==='Pemasukan').sort((a,b)=>String(b.tanggal).localeCompare(String(a.tanggal))).slice(0,10).map(t=>`<div class="item itemtop"><span>${esc(t.kategori)}<br><span class="muted">${esc(t.tanggal)}${t.periode?' · periode '+esc(periodOf(t)):''}</span>${pencatatLabel(t)?'<br><span class="muted">Dicatat oleh: <b>'+esc(pencatatLabel(t))+'</b></span>':''}</span><b class="positive">${rup(t.nominal)}</b></div>`).join('');
+let hist=db.transaksi.filter(t=>t.wargaId===wid&&t.jenis==='Pemasukan').sort((a,b)=>String(b.tanggal).localeCompare(String(a.tanggal))).slice(0,10).map(t=>`<div class="item itemtop"><span>${esc(t.kategori)}<br><span class="muted">${esc(t.tanggal)}${t.periode?' · periode '+esc(periodLabel(t.kategori,periodOf(t))):''}</span>${pencatatLabel(t)?'<br><span class="muted">Dicatat oleh: <b>'+esc(pencatatLabel(t))+'</b></span>':''}</span><b class="positive">${rup(t.nominal)}</b></div>`).join('');
 showModal(`<div class="itemtop"><h2 style="margin:0">${esc(w.nama)}</h2><button class="btn secondary small" onclick="closeModal()">Tutup</button></div><div class="muted">${esc(w.id)} · ${esc(w.alamat||'-')}</div><label>Periode</label><input type="month" value="${m}" onchange="openWarga('${wid}',this.value)">${rows}<h3 style="margin-top:14px">Riwayat pembayaran terakhir</h3>${hist||'<div class="empty">Belum ada pembayaran.</div>'}`)}
 function openPengeluaran(m){
   m=m||'';
@@ -639,7 +695,6 @@ ${byCat.length?`<h3 style="margin-top:14px">Per kategori <small class="muted">(k
 ${bySumber.length?`<h3 style="margin-top:14px">Per sumber dana <small class="muted">(ketuk untuk rincian)</small></h3>${bySumber.map(c=>`<div class="item itemtop link expense" style="cursor:pointer" onclick="openPengeluaranBySumber('${esc(c.k)}','${esc(m)}')" title="Lihat pengeluaran dari dana ${esc(c.k)}"><span>${esc(c.k)}</span><b class="negative">${rup(c.n)}</b></div>`).join('')}`:''}
 <p class="note" style="margin-top:14px">💡 Ketuk kategori atau sumber dana di atas untuk melihat rincian transaksi per kategori.</p>`);
 }
-function delTxFromDetail(id,m){hapusTransaksi(id,()=>{render();openPengeluaran(m||'')})}
 function openPemasukan(m){
   m=m||'';
   let list=db.transaksi.filter(t=>t.jenis==='Pemasukan'&&(!m||String(t.tanggal||'').startsWith(m))).sort((a,b)=>{let c=String(b.tanggal||'').localeCompare(String(a.tanggal||''));return c!==0?c:String(b.id||'').localeCompare(String(a.id||''))});
@@ -653,7 +708,6 @@ ${filterHtml}
 ${byCat.length?`<h3 style="margin-top:14px">Per kategori <small class="muted">(ketuk untuk rincian)</small></h3>${byCat.map(c=>`<div class="item itemtop link income" style="cursor:pointer" onclick="openPemasukanByKategori('${esc(c.k)}','${esc(m)}')" title="Lihat rincian ${esc(c.k)}"><span>${esc(c.k)}</span><b class="positive">${rup(c.n)}</b></div>`).join('')}`:''}
 <p class="note" style="margin-top:14px">💡 Ketuk kategori di atas untuk melihat rincian transaksi per kategori.</p>`);
 }
-function delTxFromPemasukanDetail(id,m){hapusTransaksi(id,()=>{render();openPemasukan(m||'')})}
 function openPengeluaranBySumber(sumber,period){
   period=period||'';
   let list=db.transaksi.filter(t=>t.jenis==='Pengeluaran'&&t.sumberDana===sumber&&(!period||String(t.tanggal||'').startsWith(period))).sort((a,b)=>{let c=String(b.tanggal||'').localeCompare(String(a.tanggal||''));return c!==0?c:String(b.id||'').localeCompare(String(a.id||''))});
@@ -679,7 +733,7 @@ function openPemasukanByKategori(kategori,period){
 <h3 style="margin-top:14px">Rincian transaksi (${list.length})</h3>
 ${list.length?list.map(t=>{
   let w=t.wargaId?db.warga.find(x=>x.id===t.wargaId):null;
-  return `<div class="item"><div class="itemtop"><b>${esc(t.uraian)}</b><span class="amount positive">+ ${rup(t.nominal)}</span></div><div class="muted">${esc(t.tanggal)}${w?' · '+esc(w.nama):''}${t.periode?' · periode '+esc(periodOf(t)):''} · ${esc(t.metode||'-')}</div>${pencatatLine(t)}<div class="actions"><button class="btn secondary small" onclick="receipt('${t.id}')">Kuitansi</button>${canEdit()?`<button class="btn danger small" onclick="closeModal();editTx('${t.id}')">Ubah</button><button class="btn danger small" onclick="delTxFromPemasukan('${t.id}','${esc(kategori)}','${esc(period)}')">Hapus</button>`:''}</div></div>`;
+  return `<div class="item"><div class="itemtop"><b>${esc(t.uraian)}</b><span class="amount positive">+ ${rup(t.nominal)}</span></div><div class="muted">${esc(t.tanggal)}${w?' · '+esc(w.nama):''}${t.periode?' · periode '+esc(periodLabel(t.kategori,periodOf(t))):''} · ${esc(t.metode||'-')}</div>${pencatatLine(t)}<div class="actions"><button class="btn secondary small" onclick="receipt('${t.id}')">Kuitansi</button>${canEdit()?`<button class="btn danger small" onclick="closeModal();editTx('${t.id}')">Ubah</button><button class="btn danger small" onclick="delTxFromPemasukan('${t.id}','${esc(kategori)}','${esc(period)}')">Hapus</button>`:''}</div></div>`;
 }).join(''):'<div class="empty">Belum ada pemasukan di kategori ini.</div>'}`);
 }
 function delTxFromPemasukan(id,kategori,period){hapusTransaksi(id,()=>{render();openPemasukanByKategori(kategori,period)})}
@@ -721,11 +775,11 @@ function tarif(w,k,periode){
   if(k==='Arisan Ngaji'&&!arisanAktif(w))return 0;
   let hist=db.settings.tarifHistory||{}, key=periode?String(periode).slice(0,7):'';
   if(key&&hist[key]&&hist[key][k]!=null&&hist[key][k]!==''){
-    let t=Number(hist[key][k])||0;
-    return t||(k==='Iuran Warga'?Number(w.iuran)||0:0);
+    return Number(hist[key][k])||0;
   }
-  let t=Number((db.settings.tarif||{})[k])||0;
-  return t||(k==='Iuran Warga'?Number(w.iuran)||0:0);
+  let raw=(db.settings.tarif||{})[k];
+  if(raw!=null&&raw!=='')return Number(raw)||0;
+  return k==='Iuran Warga'?Number(w.iuran)||0:0;
 }
 function saldoKat(k){let sk=db.settings&&db.settings.saldoKategori;if(sk)return Number(sk[k])||0;return k==='Lain-lain'?Number((db.settings&&db.settings.saldo)||0):0}
 function paruhNow(){return +dateNow().slice(8,10)<=15?1:2}
@@ -744,18 +798,6 @@ function setTempatArisan(p,wid){
   else delete db.settings.tempatArisan[p];
   save();
   render();
-}
-function getPemenangArisan(p){return (db.settings.pemenangArisan||{})[p]||''}
-function setPemenangArisan(p,wid){
-  if(!need('operator'))return;
-  if(!db.settings.pemenangArisan||typeof db.settings.pemenangArisan!=='object')db.settings.pemenangArisan={};
-  if(!wid)delete db.settings.pemenangArisan[p];
-  else{
-    let ada=db.transaksi.some(t=>t.jenis==='Pemasukan'&&t.kategori==='Arisan Ngaji'&&periodOf(t)===p);
-    if(!ada&&!confirm('Belum ada setoran tercatat untuk periode ini. Tetap tetapkan pemenang?'))return;
-    db.settings.pemenangArisan[p]=wid;
-  }
-  save();render();
 }
 
 function namaWarga(wid){
@@ -820,7 +862,10 @@ const OUT_CATS=['Kebersihan','Keamanan','Listrik/Air','Perbaikan Lingkungan','Ke
 const METHODS=['Tunai','Transfer','QRIS','Lainnya'];
 function categoryBalances(year=db.settings.tahun){return IN_CATS.map(k=>{let awal=saldoKat(k);let rows=db.transaksi.filter(t=>String(t.tanggal||'').startsWith(String(year)));let masuk=rows.filter(t=>t.jenis==='Pemasukan'&&t.kategori===k).reduce((a,t)=>a+Number(t.nominal||0),0);let keluar=rows.filter(t=>t.jenis==='Pengeluaran'&&t.sumberDana===k).reduce((a,t)=>a+Number(t.nominal||0),0);return {kategori:k,awal,masuk,keluar,saldo:awal+masuk-keluar}})}
 
+let formDirty=false;
+document.addEventListener('input',e=>{const t=e.target;if(t&&t.form&&t.closest&&t.closest('#app,#sheet'))formDirty=true},true);
 function render(){try{
+  formDirty=false;
   kunciIdentitas();
   if(!auth.role){renderLogin();return}
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
@@ -839,8 +884,8 @@ function pushToken(){try{return (window.AndroidBridge&&AndroidBridge.getPushToke
 function daftarPush(n){
   if(!auth.token)return;
   let t=pushToken();
-  if(!t){if(window.AndroidBridge&&(n||0)<5)setTimeout(()=>daftarPush((n||0)+1),4000);return}
-  google.script.run.withSuccessHandler(()=>{}).withFailureHandler(()=>{}).daftarToken(auth.token,t);
+  if(!t){if(window.AndroidBridge&&(n||0)<5)setTimeout(()=>daftarPush((n||0)+1),4000);else pushDaftar=false;return}
+  google.script.run.withSuccessHandler(()=>{}).withFailureHandler(()=>{pushDaftar=false}).daftarToken(auth.token,t);
 }
 function kirimPush(isi){
   let h={'Content-Type':'application/json',apikey:SUPABASE_KEY};
@@ -918,7 +963,7 @@ th{background:#f3f4f6}.sign{margin-top:40px;text-align:right}
 </style></head><body>
 <button onclick="var B=window.AndroidBridge||(window.opener&&window.opener.AndroidBridge);if(B){B.printHtml(document.documentElement.outerHTML)}else{window.print()}" style="padding:8px 14px;margin-bottom:12px">Cetak / Simpan PDF</button>
 <h1>Laporan Keuangan ${esc(s.rt||'')} / ${esc(s.rw||'')}</h1>
-<div class="meta">${esc(s.desa||'')} · ${esc(s.kecamatan||'')} · ${esc(s.kota||'')}<br>Periode: <b>${esc(bulan)}</b>${isF?' · Kategori: <b>'+esc(fk)+'</b>':''} · Dicetak: ${new Date().toLocaleString('id-ID',{timeZone:'Asia/Jakarta'})}</div>
+<div class="meta">${esc(s.desa||'')} · ${esc(s.kecamatan||'')} · ${esc(s.kota||'')}<br>Periode: <b>${esc(bulan)}</b>${isF?' · Kategori: <b>'+esc(fk)+'</b>':''} · Dicetak: ${nowWib().toLocaleString('id-ID',{timeZone:'Asia/Jakarta'})}</div>
 <div class="box"><b>Ringkasan</b><br>
 ${isF?`Kategori <b>${esc(fk)}</b><br>Pemasukan: <b>${rup(fin)}</b> · Pengeluaran: <b>${rup(fout)}</b> · Sisa bulan ini: <b>${rup(fin-fout)}</b><br>Saldo awal bulan: <b>${rup(awalK)}</b> · Saldo akhir bulan: <b>${rup(awalK+fin-fout)}</b>`:`Pemasukan: <b>${rup(mt.in)}</b> · Pengeluaran: <b>${rup(mt.out)}</b> · Selisih: <b>${rup((mt.in||0)-(mt.out||0))}</b><br>
 Saldo kas (semua periode): <b>${rup((s.saldo||0)+income()-expense())}</b>`}
@@ -951,7 +996,7 @@ function go(t){
 function wargaPage(){return `${canEdit()?`<div class="card" id="wFormDetails" style="border-left:5px solid #16a34a"><h3 id="wFormTitle" style="margin:0 0 10px">➕ Tambah Warga</h3><form onsubmit="saveWarga(event)"><input type="hidden" id="wId"><label>Nama kepala keluarga *</label><input id="wNama" required placeholder="Nama lengkap"><label>Alamat / Blok</label><input id="wAlamat" placeholder="Alamat"><label>No. HP</label><input id="wHp" inputmode="tel"><div class="row"><div><label>Tanggal bergabung</label><input id="wTanggal" type="date" value="${dateNow()}"></div><div><label>Status</label><select id="wStatus"><option>Aktif</option><option>Nonaktif</option></select></div></div><label>Arisan Ngaji</label><select id="wArisan"><option value="Aktif">Aktif · ikut arisan, ditagih</option><option value="Nonaktif">Nonaktif · tidak ikut, tidak ditagih</option></select><label>Nama anggota / penerima (opsional)</label><input id="wAnggota" placeholder="Nama anggota keluarga"><label>Catatan</label><input id="wCatatan"><div class="actions"><button class="btn" type="submit">Simpan warga</button><button class="btn secondary" type="reset" onclick="clearW()">Kosongkan</button></div></form></div>`:''}<div class="card"><h2>Data Warga / Kepala Keluarga</h2><input class="search" id="wSearch" placeholder="Cari nama atau alamat..." oninput="filterWarga()"><div id="wList">${wargaList(db.warga)}</div></div>`}
 function wargaList(arr){return arr.length?arr.map(w=>`<div class="item"><div class="itemtop"><b class="link" onclick="openWarga('${w.id}')">${esc(w.nama)}</b><span class="pill">${esc(w.status)}</span></div><div style="margin:4px 0"><span class="pill ${arisanAktif(w)?'green':'amber'}">Arisan Ngaji: ${arisanAktif(w)?'Aktif':'Nonaktif'}</span></div><div class="muted">${w.hp?esc(w.hp):'Belum ada no. HP'}</div><div class="muted">${esc(w.alamat||'-')}${w.anggota?' · Anggota: '+esc(w.anggota):''}</div><div class="actions"><button class="btn secondary small" onclick="openWarga('${w.id}')">Lihat iuran</button>${canEdit()?`<button class="btn secondary small" onclick="toggleArisanWarga('${w.id}')">${arisanAktif(w)?'Nonaktifkan Arisan':'Aktifkan Arisan'}</button>`:''}${canEdit()?`<button class="btn secondary small" onclick="editW('${w.id}')">Edit</button>`:''}${canEdit()?`<button class="btn danger small" onclick="delW('${w.id}')">Hapus</button>`:''}</div></div>`).join(''):'<div class="empty">Belum ada data warga.</div>'}
 function filterWarga(){let q=document.getElementById('wSearch').value.toLowerCase();document.getElementById('wList').innerHTML=wargaList(db.warga.filter(w=>(w.nama+w.alamat).toLowerCase().includes(q)))}
-function saveWarga(e){e.preventDefault();if(!need('operator'))return;let x={id:document.getElementById('wId').value||id('KK'),nama:wNama.value.trim(),alamat:wAlamat.value,hp:wHp.value,iuran:(db.warga.find(a=>a.id===document.getElementById('wId').value)||{}).iuran||0,tanggal:wTanggal.value,status:wStatus.value,arisanAktif:wArisan.value!=='Nonaktif',anggota:wAnggota.value,catatan:wCatatan.value};let i=db.warga.findIndex(w=>w.id===x.id);if(i>=0)db.warga[i]=x;else db.warga.push(x);save();render();alert('Data warga tersimpan.')}
+function saveWarga(e){e.preventDefault();if(!need('operator'))return;let x={id:document.getElementById('wId').value||id('KK'),nama:wNama.value.trim(),alamat:wAlamat.value,hp:wHp.value,iuran:(db.warga.find(a=>a.id===document.getElementById('wId').value)||{}).iuran||0,tanggal:wTanggal.value,status:wStatus.value,arisanAktif:wArisan.value!=='Nonaktif',anggota:wAnggota.value,catatan:wCatatan.value};let _ex=db.warga.find(w=>w.id===x.id)||{};x.nonaktifSejak=x.status==='Nonaktif'?(_ex.status==='Nonaktif'?(_ex.nonaktifSejak||''):dateNow()):'';let i=db.warga.findIndex(w=>w.id===x.id);if(i>=0)db.warga[i]=x;else db.warga.push(x);save();render();alert('Data warga tersimpan.')}
 function editW(x){let w=db.warga.find(a=>a.id===x);wId.value=w.id;wNama.value=w.nama;wAlamat.value=w.alamat;wHp.value=w.hp;wTanggal.value=w.tanggal;wStatus.value=w.status;wArisan.value=arisanAktif(w)?'Aktif':'Nonaktif';wCatatan.value=w.catatan;wAnggota.value=w.anggota||'';document.getElementById('wFormTitle').textContent='Edit Warga';let det=document.getElementById('wFormDetails');if(det){det.open=true;det.style.scrollMarginTop='12px';det.scrollIntoView({behavior:'smooth',block:'start'})}setTimeout(()=>{try{wNama.focus({preventScroll:true})}catch(e){}},400)}
 function toggleArisanWarga(x){
   if(!need('operator'))return;
@@ -985,11 +1030,12 @@ function pencatatLabel(t){
 }
 function pencatatNow(){return pencatatLabel({dicatatOleh:auth.user,dicatatPeran:auth.role})}
 function pencatatLine(t){let p=pencatatLabel(t);return p?`<div class="muted">Dicatat oleh: <b>${esc(p)}</b></div>`:''}
-function txItem(t){let tempat=t.tempatNama||'';return `<div class="item"><div class="itemtop"><b>${esc(t.uraian)}</b><span class="amount ${t.jenis==='Pemasukan'?'positive':'negative'}">${t.jenis==='Pemasukan'?'+':'−'} ${rup(t.nominal)}</span></div><div class="muted">${esc(t.tanggal)} · ${esc(t.kategori)}${t.sumberDana?' · Dana: '+esc(t.sumberDana):''} · ${esc(t.metode||'-')}${t.periode?' · '+esc(t.periode):''}${tempat?' · 🏠 '+esc(tempat):''}</div>${pencatatLine(t)}<div class="actions"><button class="btn secondary small" onclick="receipt('${t.id}')">Kuitansi</button>${canEdit()?`<button class="btn secondary small" onclick="editTx('${t.id}')">Ubah</button><button class="btn danger small" onclick="delTx('${t.id}')">Hapus</button>`:''}</div></div>`}
+function txItem(t){let tempat=t.tempatNama||'';return `<div class="item"><div class="itemtop"><b>${esc(t.uraian)}</b><span class="amount ${t.jenis==='Pemasukan'?'positive':'negative'}">${t.jenis==='Pemasukan'?'+':'−'} ${rup(t.nominal)}</span></div><div class="muted">${esc(t.tanggal)} · ${esc(t.kategori)}${t.sumberDana?' · Dana: '+esc(t.sumberDana):''} · ${esc(t.metode||'-')}${t.periode?' · '+esc(periodLabel(t.kategori,periodOf(t))):''}${tempat?' · 🏠 '+esc(tempat):''}</div>${pencatatLine(t)}<div class="actions"><button class="btn secondary small" onclick="receipt('${t.id}')">Kuitansi</button>${canEdit()?`<button class="btn secondary small" onclick="editTx('${t.id}')">Ubah</button><button class="btn danger small" onclick="delTx('${t.id}')">Hapus</button>`:''}</div></div>`}
 let txListLimit=50;
 function txList(arr,limit){
   limit=limit==null?txListLimit:limit;
   let sorted=arr.slice().sort((a,b)=>{let c=String(b.tanggal||'').localeCompare(String(a.tanggal||''));return c!==0?c:String(b.id||'').localeCompare(String(a.id||''))});
+  let _q=((document.getElementById('txSearch')||{}).value||'').trim();if(_q)limit=Math.max(limit,sorted.length);
   let shown=sorted.slice(0,limit), more=sorted.length>limit;
   return (shown.map(txItem).join('')||'<div class="empty">Belum ada transaksi.</div>')
     +(more?`<div class="actions"><button class="btn secondary" onclick="txListLimit+=50;filterTx()">Tampilkan lebih banyak (${sorted.length-limit} tersisa)</button></div>`:'');
@@ -1058,7 +1104,7 @@ function editTx(id){
   },50);
 }
 function batalEditTx(){
-  editId=null;
+  editId=null;formDirty=false;
   let h=document.getElementById('txFormTitle');if(h)h.textContent='Catat Transaksi';
   let b=document.getElementById('txSubmitBtn');if(b)b.textContent='Simpan transaksi';
   let c=document.getElementById('txCancelEdit');if(c)c.classList.add('hide');
@@ -1090,7 +1136,34 @@ ${ar&&canEdit()?`<div class="actions" style="margin-top:10px"><button class="btn
 ${ar?arisanNonaktifNote():''}
 ${libur?`<div class="item" style="margin-top:10px;background:rgba(254,243,199,.6);border-left:5px solid #d97706"><b>Periode ini LIBUR</b><div class="muted">Arisan Ngaji tidak ditagihkan untuk ${periodLabel(k,p)}. Warga tidak perlu membayar.</div></div>`:`<div class="grid" style="margin-top:12px"><div class="metric"><small>Total tagihan</small><strong>${rup(d.reduce((s,w)=>s+w.tagihan,0))}</strong></div><div class="metric"><small>Sudah dibayar</small><strong class="positive">${rup(d.reduce((s,w)=>s+w.paid,0))}</strong></div><div class="metric"><small>Tunggakan</small><strong class="negative">${rup(d.reduce((s,w)=>s+w.left,0))}</strong></div><div class="metric"><small>Belum lunas</small><strong class="${late.length?'negative':''}">${late.length} KK</strong></div></div>`}
 </div>
-<details class="card" open><summary><h3>${esc(k)} · ${periodLabel(k,p)}${libur?' · LIBUR':''}${!libur&&getTempatArisan(p)?' · @ '+esc(namaWarga(getTempatArisan(p))):''}</h3><span class="chev">▾</span></summary><input class="search" id="duesSearch" placeholder="Cari nama atau alamat warga..." oninput="filterDues()">${libur?`<div class="empty">Periode ini ditandai <b>LIBUR</b>. Tidak ada tagihan Arisan Ngaji.</div>`:(d.length?'':`<div class="empty">Belum ada tagihan. ${k==='Iuran Warga'?'Isi iuran bulanan di data warga.':'Isi tarif '+esc(k)+' di menu Lainnya.'}</div>`)}<div id="duesList">${duesItems(sorted,k,p)}</div></details>`}
+<details class="card" open><summary><h3>${esc(k)} · ${periodLabel(k,p)}${libur?' · LIBUR':''}${!libur&&getTempatArisan(p)?' · @ '+esc(namaWarga(getTempatArisan(p))):''}</h3><span class="chev">▾</span></summary><input class="search" id="duesSearch" placeholder="Cari nama atau alamat warga..." oninput="filterDues()">${libur?`<div class="empty">Periode ini ditandai <b>LIBUR</b>. Tidak ada tagihan Arisan Ngaji.</div>`:(d.length?'':`<div class="empty">Belum ada tagihan. ${k==='Iuran Warga'?'Isi iuran bulanan di data warga.':'Isi tarif '+esc(k)+' di menu Lainnya.'}</div>`)}<div id="duesList">${duesItems(sorted,k,p)}</div></details>${tunggakanNonaktifCard()}`}
+function tunggakanNonaktif(){
+  const hasil=[];
+  db.warga.filter(w=>w.status==='Nonaktif').forEach(w=>{
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(w.nonaktifSejak||'')){hasil.push({w,unknown:true,rows:[],total:0});return}
+    let [y,m]=w.nonaktifSejak.slice(0,7).split('-').map(Number);m++;if(m>12){m=1;y++}
+    const nx=y+'-'+String(m).padStart(2,'0'),rows=[];
+    DUES_CATS.forEach(c=>{const a=unpaidBefore(w.id,c.k,c.k==='Arisan Ngaji'?nx+'-1':nx);if(a.length)rows.push({k:c.k,n:a.length,left:a.reduce((s,x)=>s+x.left,0)})});
+    hasil.push({w,rows,total:rows.reduce((s,r)=>s+r.left,0)});
+  });
+  return hasil;
+}
+function isiNonaktifSejak(wid){
+  if(!need('operator'))return;const w=db.warga.find(x=>x.id===wid);if(!w)return;
+  const v=(prompt('Tanggal '+w.nama+' dinonaktifkan (format TTTT-BB-HH):',dateNow())||'').trim();
+  if(!v)return;if(!/^\d{4}-\d{2}-\d{2}$/.test(v)){alert('Format tanggal harus TTTT-BB-HH, misalnya 2026-03-15.');return}
+  w.nonaktifSejak=v;save();render();
+}
+function tunggakanNonaktifCard(){
+  if(!canEdit())return '';
+  const h=tunggakanNonaktif(),dengan=h.filter(x=>x.total>0),total=dengan.reduce((s,x)=>s+x.total,0);
+  const li=h.map(x=>{const w=x.w;
+    if(x.unknown)return `<div class="item"><div class="itemtop"><b>${esc(w.nama)}</b><button class="btn secondary small" onclick="isiNonaktifSejak('${esc(w.id)}')">Isi tanggal nonaktif</button></div><div class="muted">Tanggal nonaktif belum dicatat · tunggakan belum bisa dihitung</div></div>`;
+    if(!x.total)return '';
+    return `<div class="item unpaid"><div class="itemtop"><b>${esc(w.nama)}</b><span class="amount negative">${rup(x.total)}</span></div><div class="muted">Nonaktif sejak ${esc(w.nonaktifSejak)} · ${x.rows.map(r=>esc(r.k)+' '+r.n+' periode ('+rup(r.left)+')').join(' · ')}</div></div>`}).join('');
+  if(!li.trim())return '';
+  return `<details class="card"><summary><h3>Tunggakan warga nonaktif (${dengan.length} KK · ${rup(total)})</h3><span class="chev">▾</span></summary><p class="note">Laporan saja: dihitung sampai bulan warga dinonaktifkan, dan tidak ikut daftar tagihan maupun pembayaran cepat. Untuk menagih, aktifkan kembali warganya lalu catat pembayaran.</p>${li}</details>`;
+}
 function duesItems(arr,k,p){return arr.map(w=>{let st=w.left===0?'ok':w.paid>0?'part':'bad';return `<div class="item ${st==='bad'?'unpaid':st==='part'?'partial':'paid'}"><div class="itemtop"><b class="${st==='bad'?'negative':''}">${esc(w.nama)}</b><span class="pill ${st==='bad'?'red':st==='part'?'amber':'green'}">${st==='ok'?'Lunas':st==='part'?'Sebagian':'Belum bayar'}</span></div><div class="muted">${esc(w.id)} · ${esc(w.alamat||'-')} · Tagihan ${rup(w.tagihan)}</div><div class="muted">Dibayar ${rup(w.paid)}${w.left>0?' · Sisa <b class="negative">'+rup(w.left)+'</b>':''}</div>${st==='ok'&&w.tglLunas?`<div class="paidline">✓ Tanggal lunas: <b>${tglID(w.tglLunas)}</b>${w.tempatLunas?' · di rumah <b>'+esc(w.tempatLunas)+'</b>':''}</div>`:''}${w.dicatat?`<div class="muted">Dicatat oleh: <b>${esc(w.dicatat)}</b></div>`:''}${w.left>0&&canEdit()?`<div class="actions"><button class="btn small" onclick="quickPay('${w.id}','${k}','${p}',${w.left})">Catat pembayaran</button>${w.hp?`<button class="btn secondary small" onclick="remindWA('${w.id}','${k}','${p}',${w.left})">Ingatkan via WA</button>`:''}</div>`:''}</div>`}).join('')||'<div class="empty">Warga tidak ditemukan.</div>'}
 function filterDues(){let q=(document.getElementById('duesSearch')?.value||'').toLowerCase().trim(),{k,p}=duesSel(),d=duesOf(k,p);let arr=d.filter(w=>(w.nama+' '+w.id+' '+(w.alamat||'')).toLowerCase().includes(q)).sort((a,b)=>(b.left>0)-(a.left>0)||String(a.nama).localeCompare(b.nama));let el=document.getElementById('duesList');if(el)el.innerHTML=duesItems(arr,k,p)}
 function remindWA(wid,k,p,left){let w=db.warga.find(x=>x.id===wid);if(!w||!w.hp)return;let q=String(w.hp).replace(/\D/g,'');if(q.startsWith('0'))q='62'+q.slice(1);else if(q.startsWith('8'))q='62'+q;let t=db.settings;let msg=`Yth. Bapak/Ibu ${w.nama}, kami pengurus ${t.rt}/${t.rw}. Mengingatkan ${k} periode ${periodLabel(k,p)} sebesar ${rup(left)} belum tercatat lunas. Mohon konfirmasi pembayarannya. Terima kasih.${t.bendahara?' — '+t.bendahara+' (Bendahara)':''}`;window.open('https://wa.me/'+q+'?text='+encodeURIComponent(msg),'_blank')}
@@ -1141,6 +1214,7 @@ function quickPay(wid,k,p,left,fromWarga=false){
   let totalArrears=arrears.reduce((s,a)=>s+a.left,0);
   let totalDue=totalArrears+left;
   let tempatId=k==='Arisan Ngaji'?getTempatArisan(p):'';
+  if(k==='Arisan Ngaji'&&!tempatId&&!confirm('Tempat bayar belum dipilih — pembayaran akan tercatat tanpa lokasi. Lanjut?'))return;
   let tempatNama=tempatId?namaWarga(tempatId):'';
   let tempatSuffix=tempatNama?' · di rumah '+tempatNama:'';
   let hint=totalArrears>0
@@ -1199,9 +1273,9 @@ function dailyTotals(m){let map={};db.transaksi.filter(t=>String(t.tanggal||'').
 function exportDailyReport(m){let rows=dailyTotals(m);download('rekap-harian-'+m+'.csv','Tanggal,Jumlah Transaksi,Pemasukan,Pengeluaran,Selisih\n'+rows.map(d=>[d.tanggal,d.count,d.in,d.out,d.in-d.out].map(csv).join(',')).join('\n'))}
 function lapKatOptions(sel){return IN_CATS.map(k=>`<option value="${k}" ${sel===k?'selected':''}>${k}</option>`).join('')}
 function exportReport(m){let a=db.transaksi.filter(t=>t.tanggal.startsWith(m));download('laporan-'+m+'.csv','Tanggal,Jenis,Kategori,Sumber Dana,Uraian,Nominal,Metode,Dicatat oleh\n'+a.map(t=>[t.tanggal,t.jenis,t.kategori,t.sumberDana,t.uraian,t.nominal,t.metode,pencatatLabel(t)].map(csv).join(',')).join('\n'))}
-function csv(v){return '"'+String(v??'').replace(/"/g,'""')+'"'}
+function csv(v){let t=String(v??'');if(/^[=+\-@\t\r]/.test(t))t="'"+t;return '"'+t.replace(/"/g,'""')+'"'}
 function receipt(x){let t=db.transaksi.find(a=>a.id===x),w=db.warga.find(a=>a.id===t.wargaId);let win=window.open('','_blank');if(!win){alert('Izinkan pop-up untuk mencetak kuitansi.');return}win.document.write(`<html><head><title>Kuitansi</title><style>body{font:16px Arial;padding:28px}h2{text-align:center}.box{border:1px solid #555;padding:20px;max-width:500px;margin:auto}.line{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px dashed #bbb}</style></head><body><div class="box"><h2>KUITANSI PEMBAYARAN</h2><p>${esc(db.settings.rt)} / ${esc(db.settings.rw)} · ${esc(db.settings.desa)}</p><div class="line"><span>No. Transaksi</span><b>${esc(t.id)}</b></div><div class="line"><span>Tanggal</span><b>${esc(t.tanggal)}</b></div><div class="line"><span>Diterima dari / terkait</span><b>${esc(w?.nama||'-')}</b></div><div class="line"><span>Keterangan</span><b>${esc(t.uraian)}</b></div><div class="line"><span>Nominal</span><b>${rup(t.nominal)}</b></div><div class="line"><span>Metode</span><b>${esc(t.metode)}</b></div>${pencatatLabel(t)?`<div class="line"><span>Dicatat oleh</span><b>${esc(pencatatLabel(t))}</b></div>`:''}${t.sumberDana?`<div class="line"><span>Sumber Dana</span><b>${esc(t.sumberDana)}</b></div>`:'' }<p style="text-align:right;margin-top:40px">Bendahara,<br><br><br><b>${esc(db.settings.bendahara||'________________')}</b></p></div><script>var B=window.AndroidBridge||(window.opener&&window.opener.AndroidBridge);if(B){B.printHtml(document.documentElement.outerHTML)}else{window.print()}<\/script></body></html>`);win.document.close()}
-function lainPage(){let s=db.settings;return passwordCard()+userCard()+logHapusCard()+(canEdit()?`<details class="card"><summary><h2 style="margin:0;font-size:18px">Pengaturan RT/RW</h2><span class="chev">▾</span></summary><form onsubmit="saveSettings(event)"><p class="note">🔒 Identitas RT/RW dikunci permanen untuk RT 003. Hanya tahun laporan, tarif, saldo awal, dan bendahara yang dapat diubah.</p>
+function lainPage(){let s=db.settings;return passwordCard()+userCard()+logHapusCard()+terhapusCard()+(canEdit()?`<details class="card"><summary><h2 style="margin:0;font-size:18px">Pengaturan RT/RW</h2><span class="chev">▾</span></summary><form onsubmit="saveSettings(event)"><p class="note">🔒 Identitas RT/RW dikunci permanen untuk RT 003. Hanya tahun laporan, tarif, saldo awal, dan bendahara yang dapat diubah.</p>
 <label>Nama RT 🔒</label><input id="sRt" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.rt)}">
 <label>Nama RW 🔒</label><input id="sRw" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.rw)}">
 <label>Desa / Kelurahan 🔒</label><input id="sDesa" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.desa)}">
@@ -1213,15 +1287,17 @@ ${canEdit()?`<details class="card"><summary><h3>Cadangkan & pulihkan data</h3><s
 <details class="card"><summary><h3>Tentang aplikasi</h3><span class="chev">▾</span></summary><p class="note">Aplikasi mengikuti workbook terbaru: Dashboard, Pengaturan, Data Warga, Transaksi, Tagihan Iuran, Laporan Bulanan, dan Kuitansi. Termasuk kategori Arisan Ngaji serta rekap saldo setiap kategori pemasukan dan pengeluaran.</p><div style="margin-top:14px;text-align:right;font-size:11px;letter-spacing:.6px;color:var(--muted);opacity:.7;font-style:italic">by : @argisk</div></details>`}
 function saveSettings(e){e.preventDefault();if(!need('operator'))return;let sk=IN_CATS.map((k,i)=>+document.getElementById('sk'+i).value||0);let ident={...IDENTITAS};if(isAdmin()){let alasan=mintaAlasan('Alasan ubah pengaturan (opsional)','');if(alasan===null)return;if(alasan){setAlasan(null,alasan,true);db._alasan._pengaturan=alasan}}let newTarif=Object.fromEntries(TARIF_CATS.map((k,i)=>[k,+document.getElementById('st'+i).value||0]));
 let th=Object.assign({},db.settings.tarifHistory||{});
+{let lamaT=db.settings.tarif||{},bln=[monthNow()];db.transaksi.forEach(t=>t.tanggal&&bln.push(String(t.tanggal).slice(0,7)));db.warga.forEach(w=>w.tanggal&&bln.push(String(w.tanggal).slice(0,7)));let mulai=bln.filter(x=>/^\d{4}-\d{2}$/.test(x)).sort()[0]||monthNow(),cur=monthNow(),y=+mulai.slice(0,4),m=+mulai.slice(5,7);
+while((y+'-'+String(m).padStart(2,'0'))<cur){let key=y+'-'+String(m).padStart(2,'0');if(!th[key])th[key]=Object.assign({},lamaT);m++;if(m>12){m=1;y++}}}
 th[monthNow()]=Object.assign({},newTarif);
-db.settings={...ident,tahun:+sTahun.value,saldo:sk.reduce((x,y)=>x+y,0),saldoKategori:Object.fromEntries(IN_CATS.map((k,i)=>[k,sk[i]])),tarif:newTarif,tarifHistory:th,bendahara:sBendahara.value,liburArisan:db.settings.liburArisan||[],tempatArisan:db.settings.tempatArisan||{},pemenangArisan:db.settings.pemenangArisan||{},...(db.settings.totalKK!=null?{totalKK:db.settings.totalKK}:{}),...(db.settings.pengumuman?{pengumuman:db.settings.pengumuman}:{})};save();render();alert('Pengaturan disimpan.')}
+db.settings={...ident,tahun:(+sTahun.value||+wibParts().year),saldo:sk.reduce((x,y)=>x+y,0),saldoKategori:Object.fromEntries(IN_CATS.map((k,i)=>[k,sk[i]])),tarif:newTarif,tarifHistory:th,bendahara:sBendahara.value,liburArisan:db.settings.liburArisan||[],tempatArisan:db.settings.tempatArisan||{},pemenangArisan:db.settings.pemenangArisan||{},...(db.settings.totalKK!=null?{totalKK:db.settings.totalKK}:{}),...(db.settings.pengumuman?{pengumuman:db.settings.pengumuman}:{})};save();render();alert('Pengaturan disimpan.')}
 function download(name,content,type='text/csv;charset=utf-8'){let b=new Blob(['\ufeff'+content],{type}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=name;a.click();URL.revokeObjectURL(u)}
 function backup(){download('backup-keuangan-rt-'+dateNow()+'.json',JSON.stringify(db,null,2),'application/json')}
 function restore(e){if(!need('operator'))return;let f=e.target.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{try{let x=JSON.parse(r.result);if(!x.settings||!Array.isArray(x.warga)||!Array.isArray(x.transaksi))throw 0;if(confirm('Pulihkan backup? Data saat ini akan diganti.')){db=x;save();render();alert('Backup berhasil dipulihkan.')}}catch(z){alert('File backup tidak valid.')}};r.readAsText(f)}
 function exportWarga(){download('data-warga.csv','ID KK,Nama,Alamat,No HP,Iuran Bulanan,Tanggal Bergabung,Status,Arisan Ngaji,Nama Anggota/Penerima,Catatan\n'+db.warga.map(w=>[w.id,w.nama,w.alamat,w.hp,w.iuran,w.tanggal,w.status,arisanAktif(w)?'Aktif':'Nonaktif',w.anggota,w.catatan].map(csv).join(',')).join('\n'))}
-function resetAll(){if(!need('operator'))return;if(confirm('Yakin hapus seluruh warga, transaksi, dan pengaturan? Unduh backup dulu jika diperlukan.')){db=structuredClone(defaults);save();render()}}
+function resetAll(){if(!need('operator'))return;if(!confirm('Yakin hapus seluruh warga, transaksi, dan pengaturan? Unduh backup dulu jika diperlukan. (Jejak audit di server tetap tersimpan.)'))return;if((prompt('Ketik HAPUS (huruf besar) untuk memastikan:','')||'').trim()!=='HAPUS'){alert('Dibatalkan. Data tidak dihapus.');return}db=structuredClone(defaults);save();render()}
 sinkronWaktu();setInterval(sinkronWaktu,10*60*1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden&&Date.now()-waktuSyncAt>5*60*1000)sinkronWaktu()});
-document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>go(b.dataset.tab));
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{if(b.dataset.tab==='transaksi'&&tab==='transaksi'){const f=id=>((document.getElementById(id)||{}).value||'').trim();if((f('tNominal')||f('tUraian'))&&!confirm('Form transaksi belum disimpan. Kosongkan form?'))return;editId=null}go(b.dataset.tab)});
 document.getElementById('app').innerHTML=`<div class="card"><h2>Menghubungkan ke server…</h2><p class="note">Mohon tunggu sebentar. Data akan dimuat dari database bersama.</p><div class="actions" style="margin-top:14px"><button class="btn secondary" onclick="doLogout(true)">Masuk ulang</button></div></div>`;
 // Jika setelah 12 detik masih belum siap, tawarkan masuk ulang
 setTimeout(function(){
