@@ -276,6 +276,7 @@ function setSyncStatus(message,good=true){
 
 /* ===== Perbaikan: dialog konflik, transaksi terhapus, ekspor audit ===== */
 let konflikList=[];
+let izinMassal=false;
 function tampilKonflik(){
   if(!konflikList.length){closeModal();return}
   const ring=t=>t?esc(t.tanggal||'')+' · '+esc(t.kategori||'')+' · '+rup(t.nominal||0)+(t.uraian?' · '+esc(t.uraian):''):'(dihapus)';
@@ -408,12 +409,13 @@ function selesaiSimpan(){
 function syncSave(){
   if(cloudSaving||!cloudPending||!cloudReady)return;
   cloudSaving=true;cloudPending=false;setSyncStatus('Menyimpan ke Supabase…');
+  const massal=izinMassal;izinMassal=false;
   const snapshot=JSON.parse(JSON.stringify(db));
   if(!baseDb)baseDb=cloneDb(db);
   const ops=txOps(baseDb.transaksi,snapshot.transaksi,snapshot._alasan);
   const UKURAN=200;
   const gagalJaringan=err=>{
-    cloudSaving=false;
+    cloudSaving=false;if(massal)izinMassal=true;
     queueOffline();
     if(!isNetErr(err)){
       setSyncStatus('Gagal menyimpan · akan dicoba lagi',false);
@@ -437,7 +439,7 @@ function syncSave(){
         mergeAndRetry();
       })
       .withFailureHandler(gagalJaringan)
-      .simpanData({db:{settings:snapshot.settings,warga:snapshot.warga,_alasan:snapshot._alasan},revision:cloudRevision,token:auth.token});
+      .simpanData({db:{settings:snapshot.settings,warga:snapshot.warga,_alasan:snapshot._alasan},revision:cloudRevision,token:auth.token,massal:massal});
   };
   const kirimTx=(mulai)=>{
     if(mulai>=ops.length){
@@ -460,7 +462,7 @@ function syncSave(){
         syncFail('Gagal menyimpan transaksi. Data akan dimuat ulang, lalu ulangi input Anda.');
       })
       .withFailureHandler(gagalJaringan)
-      .simpanTransaksi({token:auth.token,ops:bagian});
+      .simpanTransaksi({token:auth.token,ops:bagian,massal:massal});
   };
   kirimTx(0);
 }
@@ -1283,7 +1285,7 @@ function lainPage(){let s=db.settings;return passwordCard()+userCard()+logHapusC
 <label>Kabupaten / Kota 🔒</label><input id="sKota" readonly style="background:#e8eee8;color:#4b5563" value="${esc(IDENTITAS.kota)}">
 <label>Tahun laporan</label><input id="sTahun" type="number" value="${s.tahun}"><h3 style="margin-top:16px">Saldo awal tiap kategori (Rp)</h3><p class="note">Saldo awal kas = jumlah semua kategori di bawah.</p>${IN_CATS.map((k,i)=>`<label>${k}</label><input id="sk${i}" type="number" value="${saldoKat(k)}">`).join('')}<h3 style="margin-top:16px">Tarif per KK (Rp)</h3><p class="note">Tarif berlaku sama untuk semua KK. Arisan Ngaji ditagih tiap 2 minggu (tgl 1–15 dan 16–akhir bulan).</p>${TARIF_CATS.map((k,i)=>`<label>${k} (${k==='Arisan Ngaji'?'per 2 minggu':'per bulan'})</label><input id="st${i}" type="number" min="0" value="${(s.tarif||{})[k]||0}">`).join('')}<label>Nama bendahara</label><input id="sBendahara" value="${esc(s.bendahara)}"><div class="actions"><button class="btn">Simpan pengaturan</button></div></form></details>`:'')+`
 <details class="card"><summary><h3>Supabase · Database bersama</h3><span class="chev">▾</span></summary><p class="note">Data utama disimpan di database Supabase milik pengurus. Perangkat lain yang membuka aplikasi ini akan membaca database yang sama. Aplikasi memeriksa pembaruan otomatis setiap 30 detik; gunakan tombol perbarui untuk mengambil data terbaru sekarang.</p><div class="actions"><button class="btn" onclick="refreshCloud(false)">↻ Perbarui dari server</button></div></details>
-${canEdit()?`<details class="card"><summary><h3>Cadangkan & pulihkan data</h3><span class="chev">▾</span></summary><p class="note">Backup JSON dapat diunduh sebagai salinan tambahan. Database utama berada di Supabase, bukan hanya di browser HP.</p><div class="actions"><button class="btn" onclick="backup()">Unduh backup</button><label class="btn secondary" style="display:inline-block;margin:0">Pulihkan backup<input type="file" accept="application/json" hidden onchange="restore(event)"></label></div><div class="actions"><button class="btn secondary" onclick="exportWarga()">Ekspor data warga CSV</button><button class="btn danger" onclick="resetAll()">Hapus seluruh data</button></div></details>`:''}
+${canEdit()?`<details class="card"><summary><h3>Cadangkan & pulihkan data</h3><span class="chev">▾</span></summary><p class="note">Backup JSON dapat diunduh sebagai salinan tambahan. Database utama berada di Supabase, bukan hanya di browser HP.</p><div class="actions"><button class="btn" onclick="backup()">Unduh backup</button><label class="btn secondary" style="display:inline-block;margin:0">Pulihkan backup<input type="file" accept="application/json" hidden onchange="restore(event)"></label></div><div class="actions"><button class="btn secondary" onclick="exportWarga()">Ekspor data warga CSV</button>${isAdmin()?`<button class="btn danger" onclick="resetAll()">Hapus seluruh data</button>`:''}</div></details>`:''}
 <details class="card"><summary><h3>Tentang aplikasi</h3><span class="chev">▾</span></summary><p class="note">Aplikasi mengikuti workbook terbaru: Dashboard, Pengaturan, Data Warga, Transaksi, Tagihan Iuran, Laporan Bulanan, dan Kuitansi. Termasuk kategori Arisan Ngaji serta rekap saldo setiap kategori pemasukan dan pengeluaran.</p><div style="margin-top:14px;text-align:right;font-size:11px;letter-spacing:.6px;color:var(--muted);opacity:.7;font-style:italic">by : @argisk</div></details>`}
 function saveSettings(e){e.preventDefault();if(!need('operator'))return;let sk=IN_CATS.map((k,i)=>+document.getElementById('sk'+i).value||0);let ident={...IDENTITAS};if(isAdmin()){let alasan=mintaAlasan('Alasan ubah pengaturan (opsional)','');if(alasan===null)return;if(alasan){setAlasan(null,alasan,true);db._alasan._pengaturan=alasan}}let newTarif=Object.fromEntries(TARIF_CATS.map((k,i)=>[k,+document.getElementById('st'+i).value||0]));
 let th=Object.assign({},db.settings.tarifHistory||{});
@@ -1293,9 +1295,9 @@ th[monthNow()]=Object.assign({},newTarif);
 db.settings={...ident,tahun:(+sTahun.value||+wibParts().year),saldo:sk.reduce((x,y)=>x+y,0),saldoKategori:Object.fromEntries(IN_CATS.map((k,i)=>[k,sk[i]])),tarif:newTarif,tarifHistory:th,bendahara:sBendahara.value,liburArisan:db.settings.liburArisan||[],tempatArisan:db.settings.tempatArisan||{},pemenangArisan:db.settings.pemenangArisan||{},...(db.settings.totalKK!=null?{totalKK:db.settings.totalKK}:{}),...(db.settings.pengumuman?{pengumuman:db.settings.pengumuman}:{})};save();render();alert('Pengaturan disimpan.')}
 function download(name,content,type='text/csv;charset=utf-8'){let b=new Blob(['\ufeff'+content],{type}),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=name;a.click();URL.revokeObjectURL(u)}
 function backup(){download('backup-keuangan-rt-'+dateNow()+'.json',JSON.stringify(db,null,2),'application/json')}
-function restore(e){if(!need('operator'))return;let f=e.target.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{try{let x=JSON.parse(r.result);if(!x.settings||!Array.isArray(x.warga)||!Array.isArray(x.transaksi))throw 0;if(confirm('Pulihkan backup? Data saat ini akan diganti.')){db=x;save();render();alert('Backup berhasil dipulihkan.')}}catch(z){alert('File backup tidak valid.')}};r.readAsText(f)}
+function restore(e){if(!need('operator'))return;let f=e.target.files[0];if(!f)return;let r=new FileReader();r.onload=()=>{try{let x=JSON.parse(r.result);if(!x.settings||!Array.isArray(x.warga)||!Array.isArray(x.transaksi))throw 0;if(confirm('Pulihkan backup? Data saat ini akan diganti.')){db=x;izinMassal=isAdmin();save();render();alert('Backup berhasil dipulihkan.')}}catch(z){alert('File backup tidak valid.')}};r.readAsText(f)}
 function exportWarga(){download('data-warga.csv','ID KK,Nama,Alamat,No HP,Iuran Bulanan,Tanggal Bergabung,Status,Arisan Ngaji,Nama Anggota/Penerima,Catatan\n'+db.warga.map(w=>[w.id,w.nama,w.alamat,w.hp,w.iuran,w.tanggal,w.status,arisanAktif(w)?'Aktif':'Nonaktif',w.anggota,w.catatan].map(csv).join(',')).join('\n'))}
-function resetAll(){if(!need('operator'))return;if(!confirm('Yakin hapus seluruh warga, transaksi, dan pengaturan? Unduh backup dulu jika diperlukan. (Jejak audit di server tetap tersimpan.)'))return;if((prompt('Ketik HAPUS (huruf besar) untuk memastikan:','')||'').trim()!=='HAPUS'){alert('Dibatalkan. Data tidak dihapus.');return}db=structuredClone(defaults);save();render()}
+function resetAll(){if(!isAdmin()){alert('Hanya admin yang dapat menghapus seluruh data.');return}if(!confirm('Yakin hapus seluruh warga, transaksi, dan pengaturan? Unduh backup dulu jika diperlukan. (Jejak audit di server tetap tersimpan.)'))return;if((prompt('Ketik HAPUS (huruf besar) untuk memastikan:','')||'').trim()!=='HAPUS'){alert('Dibatalkan. Data tidak dihapus.');return}db=structuredClone(defaults);izinMassal=true;save();render()}
 sinkronWaktu();setInterval(sinkronWaktu,10*60*1000);document.addEventListener('visibilitychange',()=>{if(!document.hidden&&Date.now()-waktuSyncAt>5*60*1000)sinkronWaktu()});
 document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{if(b.dataset.tab==='transaksi'&&tab==='transaksi'){const f=id=>((document.getElementById(id)||{}).value||'').trim();if((f('tNominal')||f('tUraian'))&&!confirm('Form transaksi belum disimpan. Kosongkan form?'))return;editId=null}go(b.dataset.tab)});
 document.getElementById('app').innerHTML=`<div class="card"><h2>Menghubungkan ke server…</h2><p class="note">Mohon tunggu sebentar. Data akan dimuat dari database bersama.</p><div class="actions" style="margin-top:14px"><button class="btn secondary" onclick="doLogout(true)">Masuk ulang</button></div></div>`;
